@@ -54,6 +54,37 @@ fn map3(c: Color, f: impl Fn(f64) -> f64) -> Color {
     }
 }
 
+/// Rotate a color's hue by `deg` degrees, leaving luminance and
+/// saturation alone. Luminance-preserving RGB rotation matrix.
+fn hue_rotate(c: Color, deg: f64) -> Color {
+    let Color::Rgb(r, g, b) = c else { return c };
+    let (r, g, b) = (r as f64, g as f64, b as f64);
+    let (s, co) = deg.to_radians().sin_cos();
+    // Constants from the standard luma-preserving hue matrix (Rec.601).
+    let m = [
+        [
+            0.213 + co * 0.787 - s * 0.213,
+            0.715 - co * 0.715 - s * 0.715,
+            0.072 - co * 0.072 + s * 0.928,
+        ],
+        [
+            0.213 - co * 0.213 + s * 0.143,
+            0.715 + co * 0.285 + s * 0.140,
+            0.072 - co * 0.072 - s * 0.283,
+        ],
+        [
+            0.213 - co * 0.213 - s * 0.787,
+            0.715 - co * 0.715 + s * 0.715,
+            0.072 + co * 0.928 + s * 0.072,
+        ],
+    ];
+    Color::Rgb(
+        (r * m[0][0] + g * m[0][1] + b * m[0][2]).clamp(0.0, 255.0) as u8,
+        (r * m[1][0] + g * m[1][1] + b * m[1][2]).clamp(0.0, 255.0) as u8,
+        (r * m[2][0] + g * m[2][1] + b * m[2][2]).clamp(0.0, 255.0) as u8,
+    )
+}
+
 fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16) -> Color {
     // knob 0..1, center neutral; a in [-1, 1].
     let a = (knob - 0.5) * 2.0;
@@ -63,20 +94,9 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16
     }
     match t {
         ScfxType::Filter => {
-            if a < 0.0 {
-                // LPF: sink into the dark, blue surviving longest.
-                match c {
-                    Color::Rgb(r, g, b) => Color::Rgb(
-                        (r as f64 * (1.0 - amt * 0.85)) as u8,
-                        (g as f64 * (1.0 - amt * 0.7)) as u8,
-                        (b as f64 * (1.0 - amt * 0.4)) as u8,
-                    ),
-                    other => other,
-                }
-            } else {
-                // HPF: wash toward white.
-                map3(c, |v| v + (255.0 - v) * amt * 0.7)
-            }
+            // Hue wheel: the knob offset is a held rotation, full turn
+            // either way sweeping the whole spectrum. Center = original.
+            hue_rotate(c, a * 180.0)
         }
         ScfxType::Crush => {
             let levels = (7.0 - amt * 5.0).max(2.0);
@@ -169,22 +189,31 @@ mod tests {
     }
 
     #[test]
-    fn filter_ends_dark_and_bright() {
-        let dark = transform(
-            Color::Rgb(200, 200, 200),
+    fn filter_rotates_hue_keeps_luma() {
+        let red = Color::Rgb(220, 30, 30);
+        let rot = transform(red, ScfxType::Filter, 1.0, 0.0, 0, 0, 80);
+        assert_ne!(rot, red, "hue rotation should change the color");
+        let luma = |c: Color| match c {
+            Color::Rgb(r, g, b) => 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64,
+            _ => 0.0,
+        };
+        assert!((luma(red) - luma(rot)).abs() < 20.0, "luma drifted");
+
+        // Gray has no hue, so rotation leaves it (near) gray.
+        let g2 = transform(
+            Color::Rgb(128, 128, 128),
             ScfxType::Filter,
-            0.0,
+            0.2,
             0.0,
             0,
             0,
             80,
         );
-        let bright = transform(Color::Rgb(50, 50, 50), ScfxType::Filter, 1.0, 0.0, 0, 0, 80);
-        if let (Color::Rgb(r1, ..), Color::Rgb(r2, ..)) = (dark, bright) {
-            assert!(r1 < 60, "lpf should darken, got {r1}");
-            assert!(r2 > 150, "hpf should brighten, got {r2}");
-        } else {
-            panic!("expected rgb");
+        if let Color::Rgb(r, g, b) = g2 {
+            assert!(
+                r.abs_diff(g) < 4 && g.abs_diff(b) < 4,
+                "gray should stay gray, got {r},{g},{b}"
+            );
         }
     }
 }
