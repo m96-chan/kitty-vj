@@ -25,15 +25,23 @@ pub struct Bindings {
     pub pads: [Vec<(u8, u8)>; crate::triggers::PADS],
     /// SOUND COLOR FX knobs per channel (CC).
     pub colors: [Option<(u8, u8)>; 4],
-    /// SCFX type select buttons (notes): filter, space, dubecho, crush.
-    pub scfx: [Option<(u8, u8)>; 4],
+    /// SCFX type select buttons (notes), hardware order left to right.
+    pub scfx: [Option<(u8, u8)>; 6],
     /// Remembered SCFX state: Some(index into scfx::TYPES) or None = off.
     /// The knob only carries depth — which FX is lit is state the app
     /// must keep, and it must survive a restart.
     pub scfx_selected: Option<usize>,
 }
 
-pub const SCFX_KEYS: [&str; 4] = ["scfx.filter", "scfx.space", "scfx.dubecho", "scfx.crush"];
+pub const SCFX_KEYS: [&str; 6] = [
+    "scfx.space",
+    "scfx.dubecho",
+    "scfx.sweep",
+    "scfx.noise",
+    "scfx.crush",
+    "scfx.filter",
+];
+const SCFX_NAMES: [&str; 6] = ["space", "dubecho", "sweep", "noise", "crush", "filter"];
 
 fn parse_cc(s: &str) -> Option<(u8, u8)> {
     let (ch, cc) = s.trim().split_once('.')?;
@@ -68,9 +76,7 @@ pub fn parse(text: &str) -> Bindings {
             }
             "scfx_type" => {
                 let v = val.trim();
-                b.scfx_selected = ["filter", "space", "dubecho", "crush"]
-                    .iter()
-                    .position(|n| *n == v);
+                b.scfx_selected = SCFX_NAMES.iter().position(|n| *n == v);
             }
             k => {
                 if let Some(name) = k.strip_prefix("pad.")
@@ -113,10 +119,7 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
         }
     }
     if let Some(i) = b.scfx_selected {
-        out.push_str(&format!(
-            "scfx_type = {}\n",
-            ["filter", "space", "dubecho", "crush"][i]
-        ));
+        out.push_str(&format!("scfx_type = {}\n", SCFX_NAMES[i]));
     }
     for (i, pad) in b.pads.iter().enumerate() {
         if !pad.is_empty() {

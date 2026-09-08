@@ -72,7 +72,7 @@ struct App {
     focus: usize,
     scfx_type: scfx::ScfxType,
     scfx_on: bool,
-    scfx_bind: [Option<(u8, u8)>; 4],
+    scfx_bind: [Option<(u8, u8)>; 6],
     triggers: triggers::Triggers,
     pad_bind: [Vec<(u8, u8)>; triggers::PADS],
     /// Walks pad slots during 'b' learn; None when idle.
@@ -126,7 +126,7 @@ impl App {
             scfx_type: bindings
                 .scfx_selected
                 .map(|i| scfx::TYPES[i])
-                .unwrap_or(scfx::ScfxType::Filter),
+                .unwrap_or(scfx::TYPES[0]),
             scfx_on: bindings.scfx_selected.is_some(),
             scfx_bind: bindings.scfx,
             focus: 0,
@@ -168,8 +168,8 @@ impl App {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
                 if !self.scfx_on {
                     self.scfx_on = true;
-                    self.scfx_type = scfx::ScfxType::Filter;
-                } else if self.scfx_type == scfx::ScfxType::Crush {
+                    self.scfx_type = scfx::TYPES[0];
+                } else if self.scfx_type == *scfx::TYPES.last().unwrap() {
                     self.scfx_on = false;
                 } else {
                     self.scfx_type = self.scfx_type.next();
@@ -461,6 +461,8 @@ impl App {
                                 self.channels[i].color,
                                 vbeat,
                                 x,
+                                y,
+                                stage.width,
                             );
                         }
                         frame.buffer_mut()[(ax, ay)] = cell;

@@ -7,26 +7,33 @@ use ratatui::style::Color;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ScfxType {
-    Filter,
     Space,
     DubEcho,
+    Sweep,
+    Noise,
     Crush,
+    Filter,
 }
 
-pub const TYPES: [ScfxType; 4] = [
-    ScfxType::Filter,
+/// Hardware order, left to right on the FLX10's SCFX row.
+pub const TYPES: [ScfxType; 6] = [
     ScfxType::Space,
     ScfxType::DubEcho,
+    ScfxType::Sweep,
+    ScfxType::Noise,
     ScfxType::Crush,
+    ScfxType::Filter,
 ];
 
 impl ScfxType {
     pub fn name(&self) -> &'static str {
         match self {
-            ScfxType::Filter => "FILTER",
             ScfxType::Space => "SPACE",
             ScfxType::DubEcho => "DUBECHO",
+            ScfxType::Sweep => "SWEEP",
+            ScfxType::Noise => "NOISE",
             ScfxType::Crush => "CRUSH",
+            ScfxType::Filter => "FILTER",
         }
     }
 
@@ -47,7 +54,7 @@ fn map3(c: Color, f: impl Fn(f64) -> f64) -> Color {
     }
 }
 
-fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16) -> Color {
+fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16) -> Color {
     // knob 0..1, center neutral; a in [-1, 1].
     let a = (knob - 0.5) * 2.0;
     let amt = a.abs();
@@ -103,6 +110,24 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16) -> Color {
                 other => other,
             }
         }
+        ScfxType::Sweep => {
+            // A curtain of darkness drawn in from the knob's side.
+            let pos = x as f64 / w.max(1) as f64;
+            let g = if a > 0.0 { pos } else { 1.0 - pos };
+            let k = 1.0 - amt * ((g * 1.5) - 0.25).clamp(0.0, 1.0);
+            map3(c, |v| v * k)
+        }
+        ScfxType::Noise => {
+            // Static: per-cell brightness jitter, gray speckle at the top.
+            let tick = (beat.max(0.0) * 16.0) as u64;
+            let n = crate::rng::unit_f64(crate::rng::hash3(x as u64, y as u64, tick ^ 0xcafe));
+            if n > 1.0 - amt * 0.25 {
+                Color::Rgb(200, 200, 200)
+            } else {
+                let k = 1.0 + (n - 0.5) * 1.8 * amt;
+                map3(c, |v| v * k)
+            }
+        }
         ScfxType::DubEcho => {
             // A brightness wave travels across the frame in beat time —
             // the repeats of the delay, spatialized. Direction follows
@@ -117,9 +142,18 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16) -> Color {
 }
 
 /// Apply to a cell's colors in place.
-pub fn apply(cell: &mut ratatui::buffer::Cell, t: ScfxType, knob: f64, beat: f64, x: u16) {
-    cell.fg = transform(cell.fg, t, knob, beat, x);
-    cell.bg = transform(cell.bg, t, knob, beat, x);
+#[allow(clippy::too_many_arguments)]
+pub fn apply(
+    cell: &mut ratatui::buffer::Cell,
+    t: ScfxType,
+    knob: f64,
+    beat: f64,
+    x: u16,
+    y: u16,
+    w: u16,
+) {
+    cell.fg = transform(cell.fg, t, knob, beat, x, y, w);
+    cell.bg = transform(cell.bg, t, knob, beat, x, y, w);
 }
 
 #[cfg(test)]
@@ -129,15 +163,23 @@ mod tests {
     #[test]
     fn center_is_neutral() {
         for t in TYPES {
-            let c = transform(Color::Rgb(120, 80, 200), t, 0.5, 3.7, 10);
+            let c = transform(Color::Rgb(120, 80, 200), t, 0.5, 3.7, 10, 4, 80);
             assert_eq!(c, Color::Rgb(120, 80, 200), "{} not neutral", t.name());
         }
     }
 
     #[test]
     fn filter_ends_dark_and_bright() {
-        let dark = transform(Color::Rgb(200, 200, 200), ScfxType::Filter, 0.0, 0.0, 0);
-        let bright = transform(Color::Rgb(50, 50, 50), ScfxType::Filter, 1.0, 0.0, 0);
+        let dark = transform(
+            Color::Rgb(200, 200, 200),
+            ScfxType::Filter,
+            0.0,
+            0.0,
+            0,
+            0,
+            80,
+        );
+        let bright = transform(Color::Rgb(50, 50, 50), ScfxType::Filter, 1.0, 0.0, 0, 0, 80);
         if let (Color::Rgb(r1, ..), Color::Rgb(r2, ..)) = (dark, bright) {
             assert!(r1 < 60, "lpf should darken, got {r1}");
             assert!(r2 > 150, "hpf should brighten, got {r2}");

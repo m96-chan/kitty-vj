@@ -13,15 +13,18 @@ fn main() {
         if let Ok(c) = input.connect(
             &port,
             "kvj-log-in",
-            move |_t, msg, txc| {
-                if let [s, d1, d2] = msg {
+            move |_t, msg, txc| match msg {
+                [s, d1, d2] => {
                     let kind = match s & 0xf0 {
                         0x90 if *d2 > 0 => "on ",
                         0x90 | 0x80 => "off",
                         0xb0 => "cc ",
-                        _ => return,
+                        _ => "?? ",
                     };
                     let _ = txc.send(format!("{kind} ch{} note{} vel{}", s & 0x0f, d1, d2));
+                }
+                other => {
+                    let _ = txc.send(format!("raw {:02x?}", &other[..other.len().min(12)]));
                 }
             },
             txc,
@@ -31,7 +34,7 @@ fn main() {
     }
     eprintln!("listening on {} ports", conns.len());
     let start = std::time::Instant::now();
-    while start.elapsed().as_secs() < 60 {
+    while start.elapsed().as_secs() < 30 {
         if let Ok(line) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
             println!("{:6.2}s {line}", start.elapsed().as_secs_f64());
         }
