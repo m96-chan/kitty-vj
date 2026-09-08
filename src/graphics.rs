@@ -80,9 +80,15 @@ pub fn transmit_placed(
     rows: u16,
 ) -> io::Result<()> {
     let b64 = base64(&fb.px);
+    // Home the cursor so the image lands top-left, inside a synchronized
+    // update so the frame swaps atomically.
     out.write_all(b"\x1b[?2026h\x1b[H")?;
-    write!(out, "\x1b_Ga=d,d=i,i={id},q=2\x1b\\")?;
 
+    // Reuse one image id and one placement id (p=1): transmitting new
+    // data to the same id replaces the image, and displaying to the same
+    // placement id replaces the placement in place. No per-frame delete
+    // — deleting then re-adding leaves a visible gap (the image doesn't
+    // stay put); replacing keeps it stable.
     let placement = if cols > 0 && rows > 0 {
         format!(",c={cols},r={rows}")
     } else {
@@ -98,7 +104,7 @@ pub fn transmit_placed(
         if first {
             write!(
                 out,
-                "\x1b_Ga=T,f=24,s={},v={},i={},q=2{placement},m={};",
+                "\x1b_Ga=T,f=24,s={},v={},i={},p=1,q=2{placement},m={};",
                 fb.w, fb.h, id, more
             )?;
             first = false;
@@ -164,10 +170,11 @@ mod tests {
         let mut out = Vec::new();
         transmit_direct(&mut out, &fb, 1).unwrap();
         let s = String::from_utf8(out).unwrap();
-        // synchronized update, home, delete, transmit-and-display header
+        // synchronized update, home, transmit-and-display with fixed
+        // image + placement ids so frames replace in place (no delete)
         assert!(s.starts_with("\x1b[?2026h\x1b[H"));
-        assert!(s.contains("a=d,d=i,i=1"));
-        assert!(s.contains("a=T,f=24,s=2,v=1,i=1"));
+        assert!(!s.contains("a=d"), "must not delete per frame");
+        assert!(s.contains("a=T,f=24,s=2,v=1,i=1,p=1"));
         assert!(s.contains("m=0;")); // single chunk, final
         assert!(s.ends_with("\x1b[?2026l"));
         // payload is the 6 RGB bytes, base64'd
