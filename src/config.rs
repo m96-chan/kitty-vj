@@ -23,7 +23,13 @@ pub struct Bindings {
     /// A pad can hold several bindings (left and right deck send the
     /// same pads on different MIDI channels); comma-separated in the file.
     pub pads: [Vec<(u8, u8)>; crate::triggers::PADS],
+    /// SOUND COLOR FX knobs per channel (CC).
+    pub colors: [Option<(u8, u8)>; 4],
+    /// SCFX type select buttons (notes): filter, space, dubecho, crush.
+    pub scfx: [Option<(u8, u8)>; 4],
 }
+
+pub const SCFX_KEYS: [&str; 4] = ["scfx.filter", "scfx.space", "scfx.dubecho", "scfx.crush"];
 
 fn parse_cc(s: &str) -> Option<(u8, u8)> {
     let (ch, cc) = s.trim().split_once('.')?;
@@ -48,6 +54,14 @@ pub fn parse(text: &str) -> Bindings {
             "ch2" => b.channels[1] = cc,
             "ch3" => b.channels[2] = cc,
             "ch4" => b.channels[3] = cc,
+            "color1" => b.colors[0] = cc,
+            "color2" => b.colors[1] = cc,
+            "color3" => b.colors[2] = cc,
+            "color4" => b.colors[3] = cc,
+            k if SCFX_KEYS.contains(&k) => {
+                let i = SCFX_KEYS.iter().position(|s| *s == k).unwrap();
+                b.scfx[i] = cc;
+            }
             k => {
                 if let Some(name) = k.strip_prefix("pad.")
                     && let Some(i) = crate::triggers::PAD_NAMES.iter().position(|n| *n == name)
@@ -76,6 +90,16 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
     for (i, ch) in b.channels.iter().enumerate() {
         if let Some(cc) = ch {
             out.push_str(&format!("ch{} = {}\n", i + 1, fmt_cc(*cc)));
+        }
+    }
+    for (i, c) in b.colors.iter().enumerate() {
+        if let Some(cc) = c {
+            out.push_str(&format!("color{} = {}\n", i + 1, fmt_cc(*cc)));
+        }
+    }
+    for (i, s) in b.scfx.iter().enumerate() {
+        if let Some(cc) = s {
+            out.push_str(&format!("{} = {}  # note\n", SCFX_KEYS[i], fmt_cc(*cc)));
         }
     }
     for (i, pad) in b.pads.iter().enumerate() {

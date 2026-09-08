@@ -7,6 +7,7 @@ mod font;
 mod link;
 mod midi;
 mod rng;
+mod scfx;
 mod triggers;
 
 use std::time::{Duration, Instant};
@@ -31,11 +32,14 @@ enum LearnTarget {
     Ch(usize),
 }
 
-/// A mixer channel: an effect slot and a vertical fader.
+/// A mixer channel: an effect slot, a vertical fader, and a COLOR knob.
 struct Channel {
     slot: usize,
     level: f64,
     cc: Option<(u8, u8)>,
+    /// Sound Color FX knob, 0..1, 0.5 = neutral.
+    color: f64,
+    color_cc: Option<(u8, u8)>,
 }
 
 const CHANNELS: usize = 4;
@@ -66,6 +70,8 @@ struct App {
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
     focus: usize,
+    scfx_type: scfx::ScfxType,
+    scfx_bind: [Option<(u8, u8)>; 4],
     triggers: triggers::Triggers,
     pad_bind: [Vec<(u8, u8)>; triggers::PADS],
     /// Walks pad slots during 'b' learn; None when idle.
@@ -113,7 +119,11 @@ impl App {
                 slot: i,
                 level: if i == 0 { 1.0 } else { 0.0 },
                 cc: bindings.channels[i],
+                color: 0.5,
+                color_cc: bindings.colors[i],
             }),
+            scfx_type: scfx::ScfxType::Filter,
+            scfx_bind: bindings.scfx,
             focus: 0,
             triggers: triggers::Triggers::new(),
             pad_bind: bindings.pads,
@@ -149,6 +159,7 @@ impl App {
             }
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
+            KeyCode::Char('x') => self.scfx_type = self.scfx_type.next(),
             KeyCode::Char('a') => {
                 if self.audio.is_none() {
                     match audio::AudioBeat::start() {
@@ -236,6 +247,8 @@ impl App {
             intensity: self.cc_bind_int,
             channels: std::array::from_fn(|i| self.channels[i].cc),
             pads: self.pad_bind.clone(),
+            colors: std::array::from_fn(|i| self.channels[i].color_cc),
+            scfx: self.scfx_bind,
         };
         let _ = config::save(std::path::Path::new(config::PATH), &b);
     }
@@ -267,6 +280,9 @@ impl App {
                         if c.cc == Some((ch, cc)) {
                             c.level = val as f64 / 127.0;
                         }
+                        if c.color_cc == Some((ch, cc)) {
+                            c.color = val as f64 / 127.0;
+                        }
                     }
                 }
                 midi::MidiEvent::NoteOn { ch, note } => {
@@ -286,6 +302,9 @@ impl App {
                             self.save_bindings();
                         }
                         continue;
+                    }
+                    if let Some(i) = self.scfx_bind.iter().position(|b| *b == Some((ch, note))) {
+                        self.scfx_type = scfx::TYPES[i];
                     }
                     if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.press(i, self.clock.beat());
@@ -403,7 +422,10 @@ impl App {
                 for &(i, l) in &parts[..n] {
                     acc += l;
                     if r < acc {
-                        frame.buffer_mut()[(ax, ay)] = self.scratch[i][(ax, ay)].clone();
+                        let mut cell = self.scratch[i][(ax, ay)].clone();
+                        // The winning channel's COLOR knob shades its cells.
+                        scfx::apply(&mut cell, self.scfx_type, self.channels[i].color, vbeat, x);
+                        frame.buffer_mut()[(ax, ay)] = cell;
                         break;
                     }
                 }
@@ -425,8 +447,13 @@ impl App {
             .enumerate()
             .map(|(i, c)| {
                 let mark = if i == self.focus { '*' } else { ' ' };
+                let col = if (c.color - 0.5).abs() > 0.04 {
+                    format!("~{:.0}", c.color * 100.0)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{mark}{}:{}·{:.0}",
+                    "{mark}{}:{}·{:.0}{col}",
                     i + 1,
                     self.effects[c.slot].name(),
                     c.level * 100.0
@@ -492,13 +519,14 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} b o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
             decks,
             status,
             self.triggers.hud(),
+            format!(" │ SC:{}", self.scfx_type.name()),
             aud,
             lnk,
             mid,
