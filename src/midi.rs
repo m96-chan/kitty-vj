@@ -12,6 +12,8 @@ use midir::{MidiInput, MidiInputConnection};
 
 pub enum MidiEvent {
     Cc { ch: u8, cc: u8, val: u8 },
+    NoteOn { ch: u8, note: u8 },
+    NoteOff { ch: u8, note: u8 },
     Clock(Instant),
     Start,
 }
@@ -50,6 +52,17 @@ impl MidiIn {
                             cc: *cc,
                             val: *val,
                         }),
+                        // Note on with velocity 0 is a release by convention.
+                        [s, note, vel] if s & 0xf0 == 0x90 && *vel > 0 => Some(MidiEvent::NoteOn {
+                            ch: s & 0x0f,
+                            note: *note,
+                        }),
+                        [s, note, _] if matches!(s & 0xf0, 0x80 | 0x90) => {
+                            Some(MidiEvent::NoteOff {
+                                ch: s & 0x0f,
+                                note: *note,
+                            })
+                        }
                         [0xf8, ..] => Some(MidiEvent::Clock(Instant::now())),
                         [0xfa, ..] => Some(MidiEvent::Start),
                         _ => None,

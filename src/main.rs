@@ -7,6 +7,7 @@ mod font;
 mod link;
 mod midi;
 mod rng;
+mod triggers;
 
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,11 @@ struct App {
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
     focus: usize,
+    triggers: triggers::Triggers,
+    pad_bind: [Option<(u8, u8)>; triggers::PADS],
+    /// Walks pad slots during 'b' learn; None when idle.
+    pad_learn: Option<usize>,
+    last_note: Option<(u8, u8)>,
     scratch: Vec<ratatui::buffer::Buffer>,
     intensity: f64,
     render_ms: f64, // EWMA of draw time
@@ -109,6 +115,10 @@ impl App {
                 cc: bindings.channels[i],
             }),
             focus: 0,
+            triggers: triggers::Triggers::new(),
+            pad_bind: bindings.pads,
+            pad_learn: None,
+            last_note: None,
             scratch: Vec::new(),
             intensity: 0.5,
             render_ms: 0.0,
@@ -157,6 +167,19 @@ impl App {
                     self.midi_clock_sync = false;
                 }
             }
+            KeyCode::Char('b') => {
+                // Pad learn: walks roll → sweep → … — hit the pad on the
+                // controller for each slot; 'b' again skips a slot.
+                self.pad_learn = match self.pad_learn {
+                    None => Some(0),
+                    Some(i) if i + 1 < triggers::PADS => Some(i + 1),
+                    Some(_) => None,
+                };
+            }
+            KeyCode::F(n @ 1..=8) => {
+                // Keyboard fallback (needs kitty's key protocol for release).
+                self.triggers.press(n as usize - 1, self.clock.beat());
+            }
             KeyCode::Char('m') => {
                 if self.midi.is_some() {
                     // Cycle the learn target: off → int → ch1..ch4 → off.
@@ -201,11 +224,18 @@ impl App {
         }
     }
 
+    fn on_key_release(&mut self, code: KeyCode) {
+        if let KeyCode::F(n @ 1..=8) = code {
+            self.triggers.release(n as usize - 1);
+        }
+    }
+
     /// Persist current CC bindings to the gig config next to the app.
     fn save_bindings(&self) {
         let b = config::Bindings {
             intensity: self.cc_bind_int,
             channels: std::array::from_fn(|i| self.channels[i].cc),
+            pads: self.pad_bind,
         };
         let _ = config::save(std::path::Path::new(config::PATH), &b);
     }
@@ -237,6 +267,27 @@ impl App {
                         if c.cc == Some((ch, cc)) {
                             c.level = val as f64 / 127.0;
                         }
+                    }
+                }
+                midi::MidiEvent::NoteOn { ch, note } => {
+                    self.last_note = Some((ch, note));
+                    if let Some(i) = self.pad_learn {
+                        self.pad_bind[i] = Some((ch, note));
+                        self.pad_learn = if i + 1 < triggers::PADS {
+                            Some(i + 1)
+                        } else {
+                            None
+                        };
+                        self.save_bindings();
+                        continue;
+                    }
+                    if let Some(i) = self.pad_bind.iter().position(|b| *b == Some((ch, note))) {
+                        self.triggers.press(i, self.clock.beat());
+                    }
+                }
+                midi::MidiEvent::NoteOff { ch, note } => {
+                    if let Some(i) = self.pad_bind.iter().position(|b| *b == Some((ch, note))) {
+                        self.triggers.release(i);
                     }
                 }
                 midi::MidiEvent::Clock(at) => self.midi_clock.tick(at),
@@ -291,10 +342,12 @@ impl App {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
 
         let beat = self.clock.beat();
+        // Backspin bends the beat the effects see; the clock keeps real time.
+        let vbeat = self.triggers.warp_beat(beat);
         let ctx = FrameCtx {
-            beat,
-            phase: self.clock.phase(1.0),
-            bar_phase: self.clock.phase(4.0),
+            beat: vbeat,
+            phase: vbeat.rem_euclid(1.0),
+            bar_phase: vbeat.rem_euclid(4.0),
             intensity: self.intensity,
         };
 
@@ -351,6 +404,7 @@ impl App {
                 // r beyond every contender lands in the background share.
             }
         }
+        self.triggers.post(frame.buffer_mut(), stage, vbeat);
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
 
         let bar = (beat / 4.0).floor() as i64 + 1;
@@ -403,6 +457,10 @@ impl App {
                 Some((ch, cc, val)) => format!(" cc{ch}.{cc}={val}"),
                 None => String::new(),
             };
+            let note = match self.last_note {
+                Some((ch, n)) => format!(" nt{ch}.{n}"),
+                None => String::new(),
+            };
             let mut bind = String::new();
             if let Some((ch, cc)) = self.cc_bind_int {
                 bind.push_str(&format!(" int←cc{ch}.{cc}"));
@@ -412,27 +470,29 @@ impl App {
                     bind.push_str(&format!(" c{}←cc{ch}.{cc}", i + 1));
                 }
             }
-            let learn = match self.learn {
-                LearnTarget::Off => String::new(),
-                LearnTarget::Intensity => " LEARN→int".to_string(),
-                LearnTarget::Ch(i) => format!(" LEARN→ch{}", i + 1),
+            let learn = match (self.learn, self.pad_learn) {
+                (_, Some(i)) => format!(" LEARN→pad.{}", triggers::PAD_NAMES[i]),
+                (LearnTarget::Off, _) => String::new(),
+                (LearnTarget::Intensity, _) => " LEARN→int".to_string(),
+                (LearnTarget::Ch(i), _) => format!(" LEARN→ch{}", i + 1),
             };
             let mclk = match (self.midi_clock_sync, self.midi_clock.bpm()) {
                 (true, Some(b)) => format!(" ♻{b:.1}"),
                 (true, None) => " ♻--".to_string(),
                 _ => String::new(),
             };
-            format!(" │ M:{port}{cc}{bind}{learn}{mclk}")
+            format!(" │ M:{port}{cc}{note}{bind}{learn}{mclk}")
         } else {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} b o a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
             decks,
             status,
+            self.triggers.hud(),
             aud,
             lnk,
             mid,
@@ -457,6 +517,12 @@ fn main() -> std::io::Result<()> {
     let plates = assets::load(std::path::Path::new(&assets_dir));
 
     let mut terminal = ratatui::init();
+    // kitty's keyboard protocol: real release events, which momentary
+    // pad-fallback keys (F1-F8) need. Harmless no-op elsewhere.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    );
     let mut app = App::new(plates, text);
 
     let mut last = Instant::now();
@@ -469,10 +535,11 @@ fn main() -> std::io::Result<()> {
 
         // Drain input.
         while event::poll(Duration::ZERO)? {
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                app.on_key(key.code);
+            if let Event::Key(key) = event::read()? {
+                match key.kind {
+                    KeyEventKind::Press | KeyEventKind::Repeat => app.on_key(key.code),
+                    KeyEventKind::Release => app.on_key_release(key.code),
+                }
             }
         }
 
@@ -503,6 +570,7 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     ratatui::restore();
     result
 }

@@ -19,6 +19,8 @@ pub const PATH: &str = "kitty-vj.conf";
 pub struct Bindings {
     pub intensity: Option<(u8, u8)>,
     pub channels: [Option<(u8, u8)>; 4],
+    /// Pad triggers by (midi channel, note) — see triggers::PAD_NAMES.
+    pub pads: [Option<(u8, u8)>; crate::triggers::PADS],
 }
 
 fn parse_cc(s: &str) -> Option<(u8, u8)> {
@@ -44,7 +46,13 @@ pub fn parse(text: &str) -> Bindings {
             "ch2" => b.channels[1] = cc,
             "ch3" => b.channels[2] = cc,
             "ch4" => b.channels[3] = cc,
-            _ => {}
+            k => {
+                if let Some(name) = k.strip_prefix("pad.")
+                    && let Some(i) = crate::triggers::PAD_NAMES.iter().position(|n| *n == name)
+                {
+                    b.pads[i] = cc;
+                }
+            }
         }
     }
     b
@@ -68,6 +76,15 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
             out.push_str(&format!("ch{} = {}\n", i + 1, fmt_cc(*cc)));
         }
     }
+    for (i, pad) in b.pads.iter().enumerate() {
+        if let Some(cc) = pad {
+            out.push_str(&format!(
+                "pad.{} = {}  # note\n",
+                crate::triggers::PAD_NAMES[i],
+                fmt_cc(*cc)
+            ));
+        }
+    }
     std::fs::write(path, out)
 }
 
@@ -77,10 +94,13 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let b = Bindings {
+        let mut b = Bindings {
             intensity: Some((0, 23)),
             channels: [Some((0, 19)), Some((0, 20)), None, Some((1, 7))],
+            ..Default::default()
         };
+        b.pads[0] = Some((7, 0));
+        b.pads[7] = Some((7, 21));
         let dir = std::env::temp_dir().join("kitty-vj-conf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(PATH);
