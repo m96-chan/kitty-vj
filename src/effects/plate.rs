@@ -4,6 +4,8 @@
 //! punch, chroma split, slice, invert flash. Plate changes land on a
 //! bar line, queued not executed.
 
+use std::rc::Rc;
+
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -17,14 +19,14 @@ use crate::rng::{hash3, unit_f64};
 const AUTO_BARS: i64 = 8;
 
 pub struct PlateFx {
-    plates: Vec<Plate>,
+    plates: Rc<Vec<Plate>>,
     current: usize,
     pending: Option<usize>,
     last_bar: i64,
 }
 
 impl PlateFx {
-    pub fn new(plates: Vec<Plate>) -> Self {
+    pub fn new(plates: Rc<Vec<Plate>>) -> Self {
         Self {
             plates,
             current: 0,

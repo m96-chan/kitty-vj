@@ -39,12 +39,13 @@ struct App {
 
 impl App {
     fn new(plates: Vec<assets::Plate>, text: String) -> Self {
+        let plates = std::rc::Rc::new(plates);
         let mut effects: Vec<Box<dyn Effect>> = vec![
             Box::new(Pulse),
             Box::new(Rain),
             Box::new(Tunnel),
             Box::new(Collapse),
-            Box::new(Cube),
+            Box::new(Cube::new(plates.clone())),
             Box::new(Sparks),
         ];
         if !plates.is_empty() {
