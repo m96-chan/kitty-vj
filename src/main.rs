@@ -1,3 +1,4 @@
+mod assets;
 mod clock;
 mod effects;
 mod rng;
@@ -12,7 +13,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use clock::{ClockSource, InternalClock, TapTempo};
-use effects::{Collapse, Effect, FrameCtx, Pulse, Rain, Tunnel};
+use effects::{Collapse, Effect, FrameCtx, PlateFx, Pulse, Rain, Tunnel};
 
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
 /// whole ticks so a run is a pure function of (seed, tick count).
@@ -33,16 +34,20 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(plates: Vec<assets::Plate>) -> Self {
+        let mut effects: Vec<Box<dyn Effect>> = vec![
+            Box::new(Pulse),
+            Box::new(Rain),
+            Box::new(Tunnel),
+            Box::new(Collapse),
+        ];
+        if !plates.is_empty() {
+            effects.push(Box::new(PlateFx::new(plates)));
+        }
         Self {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
-            effects: vec![
-                Box::new(Pulse),
-                Box::new(Rain),
-                Box::new(Tunnel),
-                Box::new(Collapse),
-            ],
+            effects,
             current: 0,
             pending: None,
             intensity: 0.5,
@@ -73,7 +78,12 @@ impl App {
                     self.pending = Some(i);
                 }
             }
-            _ => {}
+            _ => {
+                // Aim at the queued effect if a switch is pending — the
+                // operator is already playing the thing they just picked.
+                let target = self.pending.unwrap_or(self.current);
+                self.effects[target].on_key(code);
+            }
         }
     }
 
@@ -108,15 +118,21 @@ impl App {
             .pending
             .map(|i| format!(" → {}", self.effects[i].name()))
             .unwrap_or_default();
+        let status = self.effects[self.current]
+            .status()
+            .map(|s| format!(" [{s}]"))
+            .unwrap_or_default();
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-4/TAB fx  q quit",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-{}/TAB fx  q quit",
             self.clock.tempo(),
             bar,
             beat_in_bar,
             self.effects[self.current].name(),
+            status,
             pending,
             self.intensity * 100.0,
             self.render_ms,
+            self.effects.len(),
         );
         frame.render_widget(
             Paragraph::new(Line::from(hud_text)).style(Style::new().fg(Color::DarkGray)),
@@ -126,8 +142,13 @@ impl App {
 }
 
 fn main() -> std::io::Result<()> {
+    let assets_dir = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "assets".to_string());
+    let plates = assets::load(std::path::Path::new(&assets_dir));
+
     let mut terminal = ratatui::init();
-    let mut app = App::new();
+    let mut app = App::new(plates);
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;

@@ -4,15 +4,18 @@
 //! `FrameCtx` (beat time) and cell coordinates via `rng::hash3` — never
 //! from wall time. Same beat + same size = same frame.
 
+use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 mod collapse;
+mod plate;
 mod pulse;
 mod rain;
 mod tunnel;
 
 pub use collapse::Collapse;
+pub use plate::PlateFx;
 pub use pulse::Pulse;
 pub use rain::Rain;
 pub use tunnel::Tunnel;
@@ -39,6 +42,15 @@ impl FrameCtx {
 pub trait Effect {
     fn name(&self) -> &'static str;
     fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &FrameCtx);
+    /// Keys the app didn't consume are offered to the active effect.
+    /// Return true if handled.
+    fn on_key(&mut self, _code: KeyCode) -> bool {
+        false
+    }
+    /// Extra HUD text (e.g. current plate name).
+    fn status(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The classic luminance ramp, dark to bright.

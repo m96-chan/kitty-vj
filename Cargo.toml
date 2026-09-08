@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 crossterm = "0.29.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 ratatui = "0.30.2"
