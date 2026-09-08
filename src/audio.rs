@@ -16,9 +16,18 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 const ENV_RATE: f64 = 60.0;
 /// Envelope window: 512 frames ≈ 8.5 s.
 const ENV_LEN: usize = 512;
-/// One-octave tempo fold window.
-const BPM_MIN: f64 = 85.0;
-const BPM_MAX: f64 = 170.0;
+
+/// One-octave tempo fold window, adjustable live: a track above the top
+/// (e.g. 190 in the default 85–170) folds an octave down to 95 and the
+/// visuals run half-time. Shift the window so the set sits in its middle.
+/// Stored as integer BPM in two atomics so the audio thread reads it
+/// without locking.
+pub type Window = Arc<(std::sync::atomic::AtomicU32, std::sync::atomic::AtomicU32)>;
+
+pub fn window(lo: u32, hi: u32) -> Window {
+    use std::sync::atomic::AtomicU32;
+    Arc::new((AtomicU32::new(lo), AtomicU32::new(hi)))
+}
 
 #[derive(Clone, Copy)]
 pub struct BeatEstimate {
@@ -31,13 +40,22 @@ pub struct BeatEstimate {
 
 pub struct AudioBeat {
     estimate: Arc<Mutex<Option<BeatEstimate>>>,
+    win: Window,
     pub device: String,
     _stream: cpal::Stream,
 }
 
 impl AudioBeat {
+    /// Move the fold window (integer BPM). Takes effect on the next
+    /// estimate; the audio thread reads it lock-free.
+    pub fn set_window(&self, lo: u32, hi: u32) {
+        use std::sync::atomic::Ordering;
+        self.win.0.store(lo, Ordering::Relaxed);
+        self.win.1.store(hi, Ordering::Relaxed);
+    }
+
     /// Open the default input device and start detecting.
-    pub fn start() -> Result<Self, String> {
+    pub fn start(lo: u32, hi: u32) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -53,7 +71,8 @@ impl AudioBeat {
         let stream_config: cpal::StreamConfig = config.into();
 
         let estimate = Arc::new(Mutex::new(None));
-        let mut an = Analyzer::new(sr, channels, estimate.clone());
+        let win = window(lo, hi);
+        let mut an = Analyzer::new(sr, channels, estimate.clone(), win.clone());
         let err_fn = |_e| {};
 
         let stream = match sample_format {
@@ -84,6 +103,7 @@ impl AudioBeat {
 
         Ok(Self {
             estimate,
+            win,
             device: name,
             _stream: stream,
         })
@@ -112,10 +132,16 @@ struct Analyzer {
     env: VecDeque<f32>,
     hops: usize,
     shared: Arc<Mutex<Option<BeatEstimate>>>,
+    win: Window,
 }
 
 impl Analyzer {
-    fn new(sr: f64, channels: usize, shared: Arc<Mutex<Option<BeatEstimate>>>) -> Self {
+    fn new(
+        sr: f64,
+        channels: usize,
+        shared: Arc<Mutex<Option<BeatEstimate>>>,
+        win: Window,
+    ) -> Self {
         Self {
             channels,
             frame_acc: 0.0,
@@ -132,6 +158,7 @@ impl Analyzer {
             env: VecDeque::with_capacity(ENV_LEN + 1),
             hops: 0,
             shared,
+            win,
         }
     }
 
@@ -195,10 +222,13 @@ impl Analyzer {
             s / (n - lag) as f64
         };
 
-        // Candidate beat periods inside the fold window, in envelope
-        // frames: lag = ENV_RATE * 60 / bpm.
-        let lag_lo = (ENV_RATE * 60.0 / BPM_MAX).floor() as usize; // 21
-        let lag_hi = (ENV_RATE * 60.0 / BPM_MIN).ceil() as usize; // 43
+        // Candidate beat periods inside the current fold window, in
+        // envelope frames: lag = ENV_RATE * 60 / bpm.
+        use std::sync::atomic::Ordering;
+        let bpm_min = self.win.0.load(Ordering::Relaxed).max(30) as f64;
+        let bpm_max = self.win.1.load(Ordering::Relaxed).max(60) as f64;
+        let lag_lo = (ENV_RATE * 60.0 / bpm_max).floor().max(1.0) as usize;
+        let lag_hi = (ENV_RATE * 60.0 / bpm_min).ceil() as usize;
         // Fold octave aliases into the candidate BEFORE picking the
         // peak — choosing the raw winner lets noise flip octaves.
         let score = |l: usize| -> f64 { ac(l) + 0.5 * ac(2 * l) + 0.5 * ac(l.div_ceil(2)) };
@@ -266,11 +296,12 @@ mod tests {
     use super::*;
     use crate::rng::{hash, unit_f64};
 
-    /// Feed a synthetic click track and check the detector locks on.
-    fn detect(bpm: f64) -> BeatEstimate {
+    /// Feed a synthetic click track and check the detector locks on,
+    /// with the given fold window.
+    fn detect_win(bpm: f64, lo: u32, hi: u32) -> BeatEstimate {
         let sr = 48_000.0;
         let shared = Arc::new(Mutex::new(None));
-        let mut an = Analyzer::new(sr, 1, shared.clone());
+        let mut an = Analyzer::new(sr, 1, shared.clone(), window(lo, hi));
 
         let spb = (sr * 60.0 / bpm) as usize; // samples per beat
         let click = 1200; // click length in samples
@@ -287,6 +318,10 @@ mod tests {
         shared.lock().unwrap().expect("no estimate produced")
     }
 
+    fn detect(bpm: f64) -> BeatEstimate {
+        detect_win(bpm, 85, 170)
+    }
+
     #[test]
     fn locks_on_128() {
         let est = detect(128.0);
@@ -299,5 +334,23 @@ mod tests {
         // 200 BPM folds to 100 inside the 85-170 window.
         let est = detect(200.0);
         assert!((est.bpm - 100.0).abs() < 2.0, "got {}", est.bpm);
+    }
+
+    #[test]
+    fn wider_window_catches_190() {
+        // The bug: 190 in the default 85-170 window folds to 95.
+        let folded = detect_win(190.0, 85, 170);
+        assert!(
+            (folded.bpm - 95.0).abs() < 2.0,
+            "expected fold to 95, got {}",
+            folded.bpm
+        );
+        // The fix: the 120-240 window reports 190 straight.
+        let direct = detect_win(190.0, 120, 240);
+        assert!(
+            (direct.bpm - 190.0).abs() < 3.0,
+            "expected 190, got {}",
+            direct.bpm
+        );
     }
 }

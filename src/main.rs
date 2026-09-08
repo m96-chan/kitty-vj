@@ -68,6 +68,8 @@ struct App {
     audio: Option<audio::AudioBeat>,
     audio_sync: bool,
     audio_err: Option<String>,
+    /// Fold window for audio detection; cycled with 'r'.
+    bpm_window: (u32, u32),
     midi: Option<midi::MidiIn>,
     midi_clock: midi::MidiClock,
     midi_clock_sync: bool,
@@ -126,6 +128,7 @@ impl App {
             audio: None,
             audio_sync: false,
             audio_err: None,
+            bpm_window: (85, 170),
             // MIDI needs no permission prompt — open at launch.
             midi: midi::MidiIn::open().ok(),
             midi_clock: midi::MidiClock::new(),
@@ -203,9 +206,23 @@ impl App {
                 }
                 self.save_bindings();
             }
+            KeyCode::Char('r') => {
+                // Cycle the tempo fold window: pick one that puts the set
+                // in its middle, not against a fold edge.
+                const WINDOWS: [(u32, u32); 5] =
+                    [(85, 170), (120, 240), (140, 280), (170, 340), (60, 120)];
+                let i = WINDOWS
+                    .iter()
+                    .position(|&w| w == self.bpm_window)
+                    .unwrap_or(0);
+                self.bpm_window = WINDOWS[(i + 1) % WINDOWS.len()];
+                if let Some(a) = &self.audio {
+                    a.set_window(self.bpm_window.0, self.bpm_window.1);
+                }
+            }
             KeyCode::Char('a') => {
                 if self.audio.is_none() {
-                    match audio::AudioBeat::start() {
+                    match audio::AudioBeat::start(self.bpm_window.0, self.bpm_window.1) {
                         Ok(a) => {
                             self.audio = Some(a);
                             self.audio_sync = true;
@@ -578,12 +595,16 @@ impl App {
             format!(" │ AUD! {e}")
         } else if let Some(a) = &self.audio {
             let dev: String = a.device.chars().take(12).collect();
+            let (lo, hi) = self.bpm_window;
             match (self.audio_sync, a.estimate()) {
                 (true, Some(est)) => {
-                    format!(" │ ♪{dev} {:>5.1} c{:.1}", est.bpm, est.confidence)
+                    format!(
+                        " │ ♪{dev} {:>5.1} c{:.1} [{lo}-{hi}]",
+                        est.bpm, est.confidence
+                    )
                 }
-                (true, None) => format!(" │ ♪{dev} ..."),
-                (false, _) => format!(" │ ♪{dev} off"),
+                (true, None) => format!(" │ ♪{dev} ... [{lo}-{hi}]"),
+                (false, _) => format!(" │ ♪{dev} off [{lo}-{hi}]"),
             }
         } else {
             String::new()
@@ -632,7 +653,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h a r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
