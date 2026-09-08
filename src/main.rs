@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod clock;
+mod config;
 mod effects;
 mod font;
 mod link;
@@ -72,6 +73,7 @@ struct App {
 
 impl App {
     fn new(plates: Vec<assets::Plate>, text: String) -> Self {
+        let bindings = config::load(std::path::Path::new(config::PATH));
         let plates = std::rc::Rc::new(plates);
         let mut effects: Vec<Box<dyn Effect>> = vec![
             Box::new(Pulse),
@@ -96,7 +98,7 @@ impl App {
             midi: midi::MidiIn::open().ok(),
             midi_clock: midi::MidiClock::new(),
             midi_clock_sync: false,
-            cc_bind_int: None,
+            cc_bind_int: bindings.intensity,
             learn: LearnTarget::Off,
             last_cc: None,
             link: None,
@@ -104,7 +106,7 @@ impl App {
             channels: std::array::from_fn(|i| Channel {
                 slot: i,
                 level: if i == 0 { 1.0 } else { 0.0 },
-                cc: None,
+                cc: bindings.channels[i],
             }),
             focus: 0,
             scratch: None,
@@ -199,6 +201,15 @@ impl App {
         }
     }
 
+    /// Persist current CC bindings to the gig config next to the app.
+    fn save_bindings(&self) {
+        let b = config::Bindings {
+            intensity: self.cc_bind_int,
+            channels: std::array::from_fn(|i| self.channels[i].cc),
+        };
+        let _ = config::save(std::path::Path::new(config::PATH), &b);
+    }
+
     /// Drain MIDI: CC learn/binding, clock ticks, transport.
     fn process_midi(&mut self) {
         let Some(m) = &self.midi else { return };
@@ -210,10 +221,12 @@ impl App {
                         LearnTarget::Intensity => {
                             self.cc_bind_int = Some((ch, cc));
                             self.learn = LearnTarget::Off;
+                            self.save_bindings();
                         }
                         LearnTarget::Ch(i) => {
                             self.channels[i].cc = Some((ch, cc));
                             self.learn = LearnTarget::Off;
+                            self.save_bindings();
                         }
                         LearnTarget::Off => {}
                     }
