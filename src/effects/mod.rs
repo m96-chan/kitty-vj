@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 
 mod collapse;
 mod cube;
+mod imgdust;
 mod plate;
 mod pulse;
 mod rain;
@@ -19,6 +20,7 @@ mod tunnel;
 
 pub use collapse::Collapse;
 pub use cube::Cube;
+pub use imgdust::ImgDust;
 pub use plate::PlateFx;
 pub use pulse::Pulse;
 pub use rain::Rain;

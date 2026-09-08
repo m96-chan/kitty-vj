@@ -13,6 +13,9 @@ mod looks;
 mod lyrics;
 mod midi;
 mod pixfx;
+mod pixparticles;
+mod pixpost;
+mod postfx;
 mod rng;
 mod scfx;
 mod triggers;
@@ -28,7 +31,7 @@ use ratatui::widgets::Paragraph;
 
 use clock::{ClockSource, InternalClock, TapTempo};
 use effects::{
-    Collapse, Cube, Effect, FrameCtx, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
+    Collapse, Cube, Effect, FrameCtx, ImgDust, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
 };
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,11 +55,73 @@ struct Channel {
 const CHANNELS: usize = 4;
 
 /// Pixel effects available in the graphics tier, with display names.
+/// The first three are the originals; the rest are the ported particle
+/// modes, which accumulate additively and so clear the frame first.
 type PixFn = fn(&mut graphics::Framebuffer, f64, f64);
 const PIX_FX: [(&str, PixFn); 3] = [
     ("PLASMA", pixfx::plasma),
     ("TUNNEL", pixfx::tunnel),
     ("STARS", pixfx::starfield),
+];
+
+/// Ported particle modes. They take the drive signals and composite
+/// additively, so they get their own table and their own call shape.
+type PartFn = fn(&mut graphics::Framebuffer, f64, f64, &drive::Drive, (u8, u8, u8), (u8, u8, u8));
+const PIX_PARTICLES: [(&str, PartFn); 4] = [
+    ("SPARKS", pixparticles::sparks),
+    ("PXTUNNEL", pixparticles::tunnel_px),
+    ("FLOOR", pixparticles::grid_floor),
+    ("RINGS", pixparticles::rings),
+];
+
+/// Cell-grid post passes from the ported set, cycled with '\''.
+#[derive(Clone, Copy, PartialEq)]
+enum CellPost {
+    None,
+    Slice,
+    Glitch,
+    MirrorV,
+    MirrorQuad,
+    Pixelate,
+    ZoomPunch,
+    Shake,
+}
+
+const CELL_POSTS: [(&str, CellPost); 8] = [
+    ("-", CellPost::None),
+    ("SLICE", CellPost::Slice),
+    ("GLITCH", CellPost::Glitch),
+    ("MIRV", CellPost::MirrorV),
+    ("MIRQ", CellPost::MirrorQuad),
+    ("PIXEL", CellPost::Pixelate),
+    ("ZPUNCH", CellPost::ZoomPunch),
+    ("SHAKE", CellPost::Shake),
+];
+
+/// Pixel post chain entries, cycled with 'P'.
+#[derive(Clone, Copy, PartialEq)]
+enum PixPost {
+    None,
+    Warp,
+    Kaleido,
+    ZoomBlur,
+    RgbSplit,
+    Edge,
+    Bloom,
+    Crt,
+    Feedback,
+}
+
+const PIX_POSTS: [(&str, PixPost); 9] = [
+    ("-", PixPost::None),
+    ("WARP", PixPost::Warp),
+    ("KALEID", PixPost::Kaleido),
+    ("ZBLUR", PixPost::ZoomBlur),
+    ("RGB", PixPost::RgbSplit),
+    ("EDGE", PixPost::Edge),
+    ("BLOOM", PixPost::Bloom),
+    ("CRT", PixPost::Crt),
+    ("FEEDBK", PixPost::Feedback),
 ];
 
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
@@ -117,6 +182,13 @@ struct App {
     gfx_fb: graphics::Framebuffer,
     /// Which pixel effect (index into PIX_FX) when in graphics mode.
     pix: usize,
+    /// Which ported particle mode is stacked on top; None = off.
+    part: Option<usize>,
+    /// Post pass over the pixel frame.
+    pix_post: usize,
+    feedback: pixpost::Feedback,
+    /// Cell-grid post pass from the ported set.
+    cell_post: usize,
     /// Stage cell rect from the last draw, for image placement.
     stage_cells: (u16, u16),
     intensity: f64,
@@ -139,6 +211,7 @@ impl App {
             Box::new(Sparks),
         ];
         if !plates.is_empty() {
+            effects.push(Box::new(ImgDust::new(plates.clone())));
             effects.push(Box::new(PlateFx::new(plates)));
         }
         Self {
@@ -190,6 +263,10 @@ impl App {
             gfx: false,
             gfx_fb: graphics::Framebuffer::new(1, 1),
             pix: 0,
+            part: None,
+            pix_post: 0,
+            feedback: pixpost::Feedback::new(1, 1),
+            cell_post: 0,
             stage_cells: (0, 0),
             intensity: 0.5,
             hud_visible: true,
@@ -245,6 +322,16 @@ impl App {
             KeyCode::Char(']') => self.lyrics.nudge(0.25),
             KeyCode::Char('g') => self.gfx = !self.gfx,
             KeyCode::Char('p') => self.pix = (self.pix + 1) % PIX_FX.len(),
+            KeyCode::Char('P') => self.pix_post = (self.pix_post + 1) % PIX_POSTS.len(),
+            KeyCode::Char(';') => {
+                // Off → each particle mode → off.
+                self.part = match self.part {
+                    None => Some(0),
+                    Some(i) if i + 1 < PIX_PARTICLES.len() => Some(i + 1),
+                    Some(_) => None,
+                };
+            }
+            KeyCode::Char('\'') => self.cell_post = (self.cell_post + 1) % CELL_POSTS.len(),
             KeyCode::Char('x') => {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
                 if !self.scfx_on {
@@ -588,8 +675,36 @@ impl App {
             ((long * cols as u32 / (rows as u32 * 2)).max(1), long)
         };
         self.gfx_fb.resize(pw, ph);
-        let beat = self.triggers.warp_beat(self.clock.beat());
+        let beat = self.triggers.warp_beat(self.clock.beat()) + self.jog_offset();
         PIX_FX[self.pix].1(&mut self.gfx_fb, beat, self.intensity);
+        // Ported particle modes composite additively on top of the base
+        // effect — that is the `lighter` blend they had over there.
+        if let Some(p) = self.part {
+            PIX_PARTICLES[p].1(
+                &mut self.gfx_fb,
+                beat,
+                self.intensity,
+                &self.drive,
+                self.accent,
+                (255, 255, 255),
+            );
+        }
+        let t = beat * 60.0 / self.clock.tempo().max(1.0);
+        match PIX_POSTS[self.pix_post].1 {
+            PixPost::None => {}
+            PixPost::Warp => pixpost::warp(&mut self.gfx_fb, &self.drive, t, self.intensity),
+            PixPost::Kaleido => pixpost::kaleido(&mut self.gfx_fb, &self.drive, t),
+            PixPost::ZoomBlur => pixpost::zoomblur(&mut self.gfx_fb, &self.drive, self.intensity),
+            PixPost::RgbSplit => pixpost::rgb_split(&mut self.gfx_fb, &self.drive, self.intensity),
+            PixPost::Edge => {
+                pixpost::edge(&mut self.gfx_fb, &self.drive, self.accent, (255, 255, 255))
+            }
+            PixPost::Bloom => pixpost::bloom(&mut self.gfx_fb, &self.drive, self.intensity),
+            PixPost::Crt => pixpost::crt(&mut self.gfx_fb, 0.55),
+            PixPost::Feedback => self
+                .feedback
+                .apply(&mut self.gfx_fb, &self.drive, self.intensity),
+        }
         // z=-1: below the cell layer, so default-background cells show it
         // through and the two tiers composite in one pass.
         graphics::transmit_placed(out, &self.gfx_fb, 1, cols, rows, -1)
@@ -709,6 +824,38 @@ impl App {
                 // r beyond every contender lands in the background share.
             }
         }
+        match CELL_POSTS[self.cell_post].1 {
+            CellPost::None => {}
+            CellPost::Slice => postfx::slice(
+                frame.buffer_mut(),
+                stage,
+                vbeat,
+                self.drive.gbeat(),
+                self.intensity,
+            ),
+            CellPost::Glitch => postfx::glitch_rows(
+                frame.buffer_mut(),
+                stage,
+                &self.drive,
+                vbeat,
+                self.intensity,
+            ),
+            CellPost::MirrorV => postfx::mirror_v(frame.buffer_mut(), stage),
+            CellPost::MirrorQuad => postfx::mirror_quad(frame.buffer_mut(), stage),
+            CellPost::Pixelate => {
+                postfx::pixelate(frame.buffer_mut(), stage, &self.drive, self.intensity)
+            }
+            CellPost::ZoomPunch => {
+                postfx::zoom_punch_cells(frame.buffer_mut(), stage, &self.drive, self.intensity)
+            }
+            CellPost::Shake => postfx::shake(
+                frame.buffer_mut(),
+                stage,
+                &self.drive,
+                vbeat,
+                self.intensity,
+            ),
+        }
         triggers::beat_hits(
             frame.buffer_mut(),
             stage,
@@ -735,13 +882,28 @@ impl App {
         if self.jogs.iter().any(|j| j.active()) {
             trig_seg.push_str(&format!(" ↻{:+.2}", self.jog_offset()));
         }
-        let look_seg = if self.look != looks::Look::Plain {
-            format!("{} ", self.look.name())
-        } else {
-            String::new()
+        let look_seg = {
+            let mut s = if self.look != looks::Look::Plain {
+                format!("{} ", self.look.name())
+            } else {
+                String::new()
+            };
+            if self.cell_post > 0 {
+                s.push_str(&format!("{} ", CELL_POSTS[self.cell_post].0));
+            }
+            s
         };
         let gfx_seg = if self.gfx {
-            format!("▓{} ", PIX_FX[self.pix].0)
+            let part = match self.part {
+                Some(p) => format!("+{}", PIX_PARTICLES[p].0),
+                None => String::new(),
+            };
+            let post = if self.pix_post > 0 {
+                format!(">{}", PIX_POSTS[self.pix_post].0)
+            } else {
+                String::new()
+            };
+            format!("▓{}{part}{post} ", PIX_FX[self.pix].0)
         } else {
             String::new()
         };
