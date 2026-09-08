@@ -13,12 +13,16 @@ mod jog;
 mod link;
 mod looks;
 mod lyrics;
+mod meshcube;
+mod meshspeaker;
+mod meshwire;
 mod midi;
 mod pass;
 mod pixfx;
 mod pixparticles;
 mod pixpost;
 mod postfx;
+mod raster;
 mod rng;
 mod scene;
 mod scfx;
@@ -104,6 +108,37 @@ const CELL_POSTS: [(&str, CellPost); 8] = [
     ("ZPUNCH", CellPost::ZoomPunch),
     ("SHAKE", CellPost::Shake),
 ];
+
+/// The three mesh modes. They rasterise solid or wire geometry with a
+/// depth buffer, which neither the particle nor the post tables can
+/// express, so they carry their own shape — and their own plate dim,
+/// since solid geometry has to carry the frame.
+#[derive(Clone, Copy, PartialEq)]
+enum MeshMode {
+    None,
+    Cube,
+    Wire,
+    Speaker,
+}
+
+const MESH_MODES: [(&str, MeshMode); 4] = [
+    ("-", MeshMode::None),
+    ("MCUBE", MeshMode::Cube),
+    ("MWIRE", MeshMode::Wire),
+    ("MSPKR", MeshMode::Speaker),
+];
+
+impl MeshMode {
+    /// How far the plate behind ducks so the geometry reads.
+    fn plate_dim(&self) -> f64 {
+        match self {
+            MeshMode::None => 1.0,
+            MeshMode::Cube => meshcube::PLATE_DIM,
+            MeshMode::Wire => 1.0, // additive glow, nothing to duck behind
+            MeshMode::Speaker => meshspeaker::PLATE_DIM,
+        }
+    }
+}
 
 /// Pixel post chain entries, cycled with 'P'.
 #[derive(Clone, Copy, PartialEq)]
@@ -208,6 +243,13 @@ struct App {
     part: Option<usize>,
     /// Post pass over the pixel frame.
     pix_post: usize,
+    /// Plates, shared with the effects that sample them — the mesh cube
+    /// textures its faces from the same rotation.
+    plates: std::rc::Rc<Vec<assets::Plate>>,
+    /// Mesh mode and the depth buffer it rasterises into, reused across
+    /// frames so a mode change costs no allocation.
+    mesh: usize,
+    depth: raster::DepthBuffer,
     feedback: pixpost::Feedback,
     /// Cell-grid post pass from the ported set.
     cell_post: usize,
@@ -234,8 +276,9 @@ impl App {
         ];
         if !plates.is_empty() {
             effects.push(Box::new(ImgDust::new(plates.clone())));
-            effects.push(Box::new(PlateFx::new(plates)));
+            effects.push(Box::new(PlateFx::new(plates.clone())));
         }
+        let plates_shared = plates;
         Self {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
@@ -295,6 +338,9 @@ impl App {
             pix: 0,
             part: None,
             pix_post: 0,
+            plates: plates_shared,
+            mesh: 0,
+            depth: raster::DepthBuffer::new(1, 1),
             feedback: pixpost::Feedback::new(1, 1),
             cell_post: 0,
             stage_cells: (0, 0),
@@ -363,6 +409,7 @@ impl App {
             KeyCode::Char('g') => self.gfx = !self.gfx,
             KeyCode::Char('p') => self.pix = (self.pix + 1) % PIX_FX.len(),
             KeyCode::Char('P') => self.pix_post = (self.pix_post + 1) % PIX_POSTS.len(),
+            KeyCode::Char('M') => self.mesh = (self.mesh + 1) % MESH_MODES.len(),
             KeyCode::Char(';') => {
                 // Off → each particle mode → off.
                 self.part = match self.part {
@@ -811,6 +858,45 @@ impl App {
         self.gfx_fb.resize(pw, ph);
         let beat = self.triggers.warp_beat(self.clock.beat()) + self.jog_offset();
         PIX_FX[self.pix].1(&mut self.gfx_fb, beat, self.intensity);
+        // Mesh geometry is opaque and carries the frame, so the base
+        // effect behind it ducks by the mode's own amount before the
+        // solid passes land.
+        let mode = MESH_MODES[self.mesh].1;
+        let dim = mode.plate_dim();
+        if dim < 0.999 {
+            for p in self.gfx_fb.px.iter_mut() {
+                *p = (*p as f64 * dim) as u8;
+            }
+        }
+        match mode {
+            MeshMode::None => {}
+            MeshMode::Cube => meshcube::cube(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                self.intensity,
+                &self.drive,
+                &self.plates,
+            ),
+            MeshMode::Wire => meshwire::wire(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                self.intensity,
+                &self.drive,
+                self.accent,
+                (255, 255, 255),
+            ),
+            MeshMode::Speaker => meshspeaker::speaker(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                self.intensity,
+                &self.drive,
+                self.accent,
+                (255, 255, 255),
+            ),
+        }
         // Ported particle modes composite additively on top of the base
         // effect — that is the `lighter` blend they had over there.
         if let Some(p) = self.part {
@@ -1111,12 +1197,17 @@ impl App {
                 Some(p) => format!("+{}", PIX_PARTICLES[p].0),
                 None => String::new(),
             };
+            let mesh = if self.mesh > 0 {
+                format!("+{}", MESH_MODES[self.mesh].0)
+            } else {
+                String::new()
+            };
             let post = if self.pix_post > 0 {
                 format!(">{}", PIX_POSTS[self.pix_post].0)
             } else {
                 String::new()
             };
-            format!("▓{}{part}{post} ", PIX_FX[self.pix].0)
+            format!("▓{}{mesh}{part}{post} ", PIX_FX[self.pix].0)
         } else {
             String::new()
         };
@@ -1204,7 +1295,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p w x b o h y k a r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p M w x b o h y k a r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
