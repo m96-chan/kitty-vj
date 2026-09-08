@@ -4,6 +4,7 @@ mod clock;
 mod config;
 mod effects;
 mod font;
+mod generate;
 mod graphics;
 mod jog;
 mod link;
@@ -72,6 +73,9 @@ struct App {
     audio_err: Option<String>,
     /// Fold window for audio detection; cycled with 'r'.
     bpm_window: (u32, u32),
+    /// Generative plugins; empty until an adapter is registered (#17).
+    /// Disabled by default — 'k' is the kill switch either way.
+    ai: generate::Registry,
     /// Timed lyric cards, when a .lrc is present.
     lyrics: lyrics::Lyrics,
     /// Jog wheels, one per deck, scrubbing beat time.
@@ -137,6 +141,7 @@ impl App {
             audio_sync: false,
             audio_err: None,
             bpm_window: (85, 170),
+            ai: generate::Registry::default(),
             lyrics,
             jogs: Default::default(),
             jog_bind: bindings.jogs,
@@ -204,6 +209,11 @@ impl App {
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
+            KeyCode::Char('k') => {
+                // Kill switch: cuts every generator for the rest of the
+                // set. Nothing downstream may block on them anyway.
+                self.ai.enabled = !self.ai.enabled;
+            }
             KeyCode::Char('y') => {
                 // Mark the track start — the lyric clock is track time,
                 // not beat time, so it needs its own downbeat.
@@ -343,6 +353,20 @@ impl App {
             self.lyrics.words_done() as f64 / line.words.len() as f64
         };
         effects::draw_text(buf, area, ctx, &line.text, 0.5, 1.0, lit, true);
+    }
+
+    /// Take whatever the generators have ready. Never blocks; a stalled
+    /// or dead model simply yields nothing this frame.
+    fn consume_ai(&mut self) {
+        for a in self.ai.drain() {
+            match a {
+                generate::Artifact::Text(t) => self.overlay.text = t,
+                generate::Artifact::Image(_) => {
+                    // Generated plates join the rotation once the plate
+                    // effect takes shared ownership (#17).
+                }
+            }
+        }
     }
 
     /// Combined scrub from every jog, in beats.
@@ -732,7 +756,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h a r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h y k a r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -747,6 +771,7 @@ impl App {
             aud,
             lnk,
             mid,
+            self.ai.hud(),
             self.intensity * 100.0,
             self.render_ms,
             self.effects.len(),
@@ -829,6 +854,7 @@ fn main() -> std::io::Result<()> {
             app.clock.advance(TICK);
             acc -= TICK;
         }
+        app.consume_ai();
         app.process_midi();
         app.tick_jogs(now.duration_since(prev_frame).as_secs_f64());
         prev_frame = now;
