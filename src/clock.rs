@@ -43,6 +43,12 @@ impl InternalClock {
     pub fn resync(&mut self) {
         self.beats = self.beats.round();
     }
+
+    /// Shift phase directly — the PLL correction path for external
+    /// sync (audio detection now, Link/Pro DJ Link later).
+    pub fn nudge_beats(&mut self, delta: f64) {
+        self.beats += delta;
+    }
 }
 
 impl ClockSource for InternalClock {

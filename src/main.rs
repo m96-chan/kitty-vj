@@ -1,4 +1,5 @@
 mod assets;
+mod audio;
 mod clock;
 mod effects;
 mod font;
@@ -29,6 +30,9 @@ struct App {
     tap: TapTempo,
     effects: Vec<Box<dyn Effect>>,
     overlay: TextOverlay,
+    audio: Option<audio::AudioBeat>,
+    audio_sync: bool,
+    audio_err: Option<String>,
     current: usize,
     /// Effect switch requested; applied on the next bar line.
     pending: Option<usize>,
@@ -56,6 +60,9 @@ impl App {
             tap: TapTempo::new(),
             effects,
             overlay: TextOverlay::new(text),
+            audio: None,
+            audio_sync: false,
+            audio_err: None,
             current: 0,
             pending: None,
             intensity: 0.5,
@@ -81,6 +88,20 @@ impl App {
                 self.pending = Some((self.current + 1) % self.effects.len());
             }
             KeyCode::Char('o') => self.overlay.toggle(),
+            KeyCode::Char('a') => {
+                if self.audio.is_none() {
+                    match audio::AudioBeat::start() {
+                        Ok(a) => {
+                            self.audio = Some(a);
+                            self.audio_sync = true;
+                            self.audio_err = None;
+                        }
+                        Err(e) => self.audio_err = Some(e),
+                    }
+                } else {
+                    self.audio_sync = !self.audio_sync;
+                }
+            }
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.effects.len() {
@@ -94,6 +115,28 @@ impl App {
                 self.effects[target].on_key(code);
             }
         }
+    }
+
+    /// Soft PLL: slew tempo and pull phase toward the audio estimate.
+    /// Runs once per rendered frame; converges in about a second.
+    fn audio_pll(&mut self) {
+        if !self.audio_sync {
+            return;
+        }
+        let Some(est) = self.audio.as_ref().and_then(|a| a.estimate()) else {
+            return;
+        };
+        if est.confidence < 1.3 {
+            return;
+        }
+        let t = self.clock.tempo();
+        self.clock.set_tempo(t + (est.bpm - t) * 0.05);
+
+        let period = 60.0 / self.clock.tempo();
+        let target = (est.anchor.elapsed().as_secs_f64() / period).fract();
+        let mut err = target - self.clock.phase(1.0);
+        err -= err.round(); // wrap into [-0.5, 0.5)
+        self.clock.nudge_beats(err * 0.08);
     }
 
     /// Apply a pending effect switch when the bar line passes.
@@ -132,14 +175,29 @@ impl App {
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
+        let aud = if let Some(e) = &self.audio_err {
+            format!(" │ AUD! {e}")
+        } else if let Some(a) = &self.audio {
+            let dev: String = a.device.chars().take(12).collect();
+            match (self.audio_sync, a.estimate()) {
+                (true, Some(est)) => {
+                    format!(" │ ♪{dev} {:>5.1} c{:.1}", est.bpm, est.confidence)
+                }
+                (true, None) => format!(" │ ♪{dev} ..."),
+                (false, _) => format!(" │ ♪{dev} off"),
+            }
+        } else {
+            String::new()
+        };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-{}/TAB fx  o txt  q quit",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-{}/TAB fx  o txt  a aud  q quit",
             self.clock.tempo(),
             bar,
             beat_in_bar,
             self.effects[self.current].name(),
             status,
             pending,
+            aud,
             self.intensity * 100.0,
             self.render_ms,
             self.effects.len(),
@@ -189,6 +247,7 @@ fn main() -> std::io::Result<()> {
             app.clock.advance(TICK);
             acc -= TICK;
         }
+        app.audio_pll();
         app.maybe_switch(prev_beat);
 
         let t0 = Instant::now();
