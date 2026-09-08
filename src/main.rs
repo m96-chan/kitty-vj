@@ -71,6 +71,7 @@ struct App {
     /// Channel the keyboard is aimed at.
     focus: usize,
     scfx_type: scfx::ScfxType,
+    scfx_on: bool,
     scfx_bind: [Option<(u8, u8)>; 4],
     triggers: triggers::Triggers,
     pad_bind: [Vec<(u8, u8)>; triggers::PADS],
@@ -122,7 +123,11 @@ impl App {
                 color: 0.5,
                 color_cc: bindings.colors[i],
             }),
-            scfx_type: scfx::ScfxType::Filter,
+            scfx_type: bindings
+                .scfx_selected
+                .map(|i| scfx::TYPES[i])
+                .unwrap_or(scfx::ScfxType::Filter),
+            scfx_on: bindings.scfx_selected.is_some(),
             scfx_bind: bindings.scfx,
             focus: 0,
             triggers: triggers::Triggers::new(),
@@ -159,7 +164,18 @@ impl App {
             }
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
-            KeyCode::Char('x') => self.scfx_type = self.scfx_type.next(),
+            KeyCode::Char('x') => {
+                // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
+                if !self.scfx_on {
+                    self.scfx_on = true;
+                    self.scfx_type = scfx::ScfxType::Filter;
+                } else if self.scfx_type == scfx::ScfxType::Crush {
+                    self.scfx_on = false;
+                } else {
+                    self.scfx_type = self.scfx_type.next();
+                }
+                self.save_bindings();
+            }
             KeyCode::Char('a') => {
                 if self.audio.is_none() {
                     match audio::AudioBeat::start() {
@@ -249,6 +265,10 @@ impl App {
             pads: self.pad_bind.clone(),
             colors: std::array::from_fn(|i| self.channels[i].color_cc),
             scfx: self.scfx_bind,
+            scfx_selected: self
+                .scfx_on
+                .then(|| scfx::TYPES.iter().position(|t| *t == self.scfx_type))
+                .flatten(),
         };
         let _ = config::save(std::path::Path::new(config::PATH), &b);
     }
@@ -304,7 +324,16 @@ impl App {
                         continue;
                     }
                     if let Some(i) = self.scfx_bind.iter().position(|b| *b == Some((ch, note))) {
-                        self.scfx_type = scfx::TYPES[i];
+                        // Hardware semantics: pressing the lit button
+                        // turns the section off; the app mirrors that
+                        // state and persists it across restarts.
+                        if self.scfx_on && self.scfx_type == scfx::TYPES[i] {
+                            self.scfx_on = false;
+                        } else {
+                            self.scfx_type = scfx::TYPES[i];
+                            self.scfx_on = true;
+                        }
+                        self.save_bindings();
                     }
                     if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.press(i, self.clock.beat());
@@ -423,8 +452,17 @@ impl App {
                     acc += l;
                     if r < acc {
                         let mut cell = self.scratch[i][(ax, ay)].clone();
-                        // The winning channel's COLOR knob shades its cells.
-                        scfx::apply(&mut cell, self.scfx_type, self.channels[i].color, vbeat, x);
+                        // The winning channel's COLOR knob shades its
+                        // cells — only while the SCFX section is lit.
+                        if self.scfx_on {
+                            scfx::apply(
+                                &mut cell,
+                                self.scfx_type,
+                                self.channels[i].color,
+                                vbeat,
+                                x,
+                            );
+                        }
                         frame.buffer_mut()[(ax, ay)] = cell;
                         break;
                     }
@@ -526,7 +564,11 @@ impl App {
             decks,
             status,
             self.triggers.hud(),
-            self.scfx_type.name(),
+            if self.scfx_on {
+                self.scfx_type.name()
+            } else {
+                "OFF"
+            },
             aud,
             lnk,
             mid,
