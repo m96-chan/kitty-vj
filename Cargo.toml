@@ -7,4 +7,6 @@ edition = "2024"
 cpal = "0.18.2"
 crossterm = "0.29.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+midir = "0.11.0"
 ratatui = "0.30.2"
+rusty_link = "0.4.9"
