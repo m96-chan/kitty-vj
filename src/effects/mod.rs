@@ -9,15 +9,21 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 mod collapse;
+mod cube;
 mod plate;
 mod pulse;
 mod rain;
+mod sparks;
+mod text;
 mod tunnel;
 
 pub use collapse::Collapse;
+pub use cube::Cube;
 pub use plate::PlateFx;
 pub use pulse::Pulse;
 pub use rain::Rain;
+pub use sparks::Sparks;
+pub use text::TextOverlay;
 pub use tunnel::Tunnel;
 
 /// Everything an effect is allowed to know about the world.

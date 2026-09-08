@@ -1,6 +1,7 @@
 mod assets;
 mod clock;
 mod effects;
+mod font;
 mod rng;
 
 use std::time::{Duration, Instant};
@@ -13,7 +14,9 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use clock::{ClockSource, InternalClock, TapTempo};
-use effects::{Collapse, Effect, FrameCtx, PlateFx, Pulse, Rain, Tunnel};
+use effects::{
+    Collapse, Cube, Effect, FrameCtx, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
+};
 
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
 /// whole ticks so a run is a pure function of (seed, tick count).
@@ -25,6 +28,7 @@ struct App {
     clock: InternalClock,
     tap: TapTempo,
     effects: Vec<Box<dyn Effect>>,
+    overlay: TextOverlay,
     current: usize,
     /// Effect switch requested; applied on the next bar line.
     pending: Option<usize>,
@@ -34,12 +38,14 @@ struct App {
 }
 
 impl App {
-    fn new(plates: Vec<assets::Plate>) -> Self {
+    fn new(plates: Vec<assets::Plate>, text: String) -> Self {
         let mut effects: Vec<Box<dyn Effect>> = vec![
             Box::new(Pulse),
             Box::new(Rain),
             Box::new(Tunnel),
             Box::new(Collapse),
+            Box::new(Cube),
+            Box::new(Sparks),
         ];
         if !plates.is_empty() {
             effects.push(Box::new(PlateFx::new(plates)));
@@ -48,6 +54,7 @@ impl App {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
             effects,
+            overlay: TextOverlay::new(text),
             current: 0,
             pending: None,
             intensity: 0.5,
@@ -72,6 +79,7 @@ impl App {
             KeyCode::Tab => {
                 self.pending = Some((self.current + 1) % self.effects.len());
             }
+            KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.effects.len() {
@@ -111,6 +119,7 @@ impl App {
             intensity: self.intensity,
         };
         self.effects[self.current].render(frame.buffer_mut(), stage, &ctx);
+        self.overlay.render(frame.buffer_mut(), stage, &ctx);
 
         let bar = (beat / 4.0).floor() as i64 + 1;
         let beat_in_bar = ctx.bar_phase as i64 + 1;
@@ -123,7 +132,7 @@ impl App {
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-{}/TAB fx  q quit",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPACE tap  ±bpm  ↑↓ int  1-{}/TAB fx  o txt  q quit",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -145,10 +154,13 @@ fn main() -> std::io::Result<()> {
     let assets_dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "assets".to_string());
+    let text = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "KITTY-VJ".to_string());
     let plates = assets::load(std::path::Path::new(&assets_dir));
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(plates);
+    let mut app = App::new(plates, text);
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;
