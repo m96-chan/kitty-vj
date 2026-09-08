@@ -80,6 +80,8 @@ struct App {
     last_note: Option<(u8, u8)>,
     scratch: Vec<ratatui::buffer::Buffer>,
     intensity: f64,
+    /// HUD off = clean feed for the projector.
+    hud_visible: bool,
     render_ms: f64, // EWMA of draw time
     quit: bool,
 }
@@ -136,6 +138,7 @@ impl App {
             last_note: None,
             scratch: Vec::new(),
             intensity: 0.5,
+            hud_visible: true,
             render_ms: 0.0,
             quit: false,
         }
@@ -164,6 +167,7 @@ impl App {
             }
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
+            KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
             KeyCode::Char('x') => {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
                 if !self.scfx_on {
@@ -392,8 +396,12 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        // HUD hidden: the stage takes the whole screen — a clean feed
+        // for the HDMI projector. The operator's info lives on the last
+        // row otherwise.
+        let hud_h = if self.hud_visible { 1 } else { 0 };
         let [stage, hud] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(hud_h)]).areas(frame.area());
 
         let beat = self.clock.beat();
         // Backspin bends the beat the effects see; the clock keeps real time.
@@ -474,6 +482,10 @@ impl App {
         }
         self.triggers.post(frame.buffer_mut(), stage, vbeat);
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
+
+        if !self.hud_visible {
+            return;
+        }
 
         let bar = (beat / 4.0).floor() as i64 + 1;
         let beat_in_bar = ctx.bar_phase as i64 + 1;
@@ -559,7 +571,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o h a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -585,6 +597,17 @@ impl App {
     }
 }
 
+/// Kills the caffeinate child when the app exits.
+#[cfg(target_os = "macos")]
+struct CaffeinateGuard(std::process::Child);
+
+#[cfg(target_os = "macos")]
+impl Drop for CaffeinateGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let assets_dir = std::env::args()
         .nth(1)
@@ -593,6 +616,15 @@ fn main() -> std::io::Result<()> {
         .nth(2)
         .unwrap_or_else(|| "KITTY-VJ".to_string());
     let plates = assets::load(std::path::Path::new(&assets_dir));
+
+    // Keep the display awake for the length of the set — a projector
+    // going to sleep mid-show is the classic HDMI gig failure. Dies
+    // with us since it's a child process.
+    #[cfg(target_os = "macos")]
+    let _caffeinate = std::process::Command::new("caffeinate")
+        .arg("-d")
+        .spawn()
+        .map(CaffeinateGuard);
 
     let mut terminal = ratatui::init();
     // kitty's keyboard protocol: real release events, which momentary
