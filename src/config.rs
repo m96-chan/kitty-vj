@@ -15,12 +15,14 @@ use std::path::Path;
 
 pub const PATH: &str = "kitty-vj.conf";
 
-#[derive(Default, Clone, Copy, PartialEq)]
+#[derive(Default, Clone, PartialEq)]
 pub struct Bindings {
     pub intensity: Option<(u8, u8)>,
     pub channels: [Option<(u8, u8)>; 4],
     /// Pad triggers by (midi channel, note) — see triggers::PAD_NAMES.
-    pub pads: [Option<(u8, u8)>; crate::triggers::PADS],
+    /// A pad can hold several bindings (left and right deck send the
+    /// same pads on different MIDI channels); comma-separated in the file.
+    pub pads: [Vec<(u8, u8)>; crate::triggers::PADS],
 }
 
 fn parse_cc(s: &str) -> Option<(u8, u8)> {
@@ -50,7 +52,7 @@ pub fn parse(text: &str) -> Bindings {
                 if let Some(name) = k.strip_prefix("pad.")
                     && let Some(i) = crate::triggers::PAD_NAMES.iter().position(|n| *n == name)
                 {
-                    b.pads[i] = cc;
+                    b.pads[i] = val.split(',').filter_map(parse_cc).collect();
                 }
             }
         }
@@ -77,11 +79,12 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
         }
     }
     for (i, pad) in b.pads.iter().enumerate() {
-        if let Some(cc) = pad {
+        if !pad.is_empty() {
+            let list: Vec<String> = pad.iter().map(|cc| fmt_cc(*cc)).collect();
             out.push_str(&format!(
                 "pad.{} = {}  # note\n",
                 crate::triggers::PAD_NAMES[i],
-                fmt_cc(*cc)
+                list.join(", ")
             ));
         }
     }
@@ -99,8 +102,8 @@ mod tests {
             channels: [Some((0, 19)), Some((0, 20)), None, Some((1, 7))],
             ..Default::default()
         };
-        b.pads[0] = Some((7, 0));
-        b.pads[7] = Some((7, 21));
+        b.pads[0] = vec![(7, 16), (9, 16)]; // both decks
+        b.pads[7] = vec![(7, 21)];
         let dir = std::env::temp_dir().join("kitty-vj-conf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(PATH);

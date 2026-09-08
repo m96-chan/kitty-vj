@@ -67,7 +67,7 @@ struct App {
     /// Channel the keyboard is aimed at.
     focus: usize,
     triggers: triggers::Triggers,
-    pad_bind: [Option<(u8, u8)>; triggers::PADS],
+    pad_bind: [Vec<(u8, u8)>; triggers::PADS],
     /// Walks pad slots during 'b' learn; None when idle.
     pad_learn: Option<usize>,
     last_note: Option<(u8, u8)>,
@@ -235,7 +235,7 @@ impl App {
         let b = config::Bindings {
             intensity: self.cc_bind_int,
             channels: std::array::from_fn(|i| self.channels[i].cc),
-            pads: self.pad_bind,
+            pads: self.pad_bind.clone(),
         };
         let _ = config::save(std::path::Path::new(config::PATH), &b);
     }
@@ -272,21 +272,27 @@ impl App {
                 midi::MidiEvent::NoteOn { ch, note } => {
                     self.last_note = Some((ch, note));
                     if let Some(i) = self.pad_learn {
-                        self.pad_bind[i] = Some((ch, note));
-                        self.pad_learn = if i + 1 < triggers::PADS {
-                            Some(i + 1)
-                        } else {
-                            None
-                        };
-                        self.save_bindings();
+                        // A note some pad already owns is ignored: one
+                        // press can double-fire, and eating two learn
+                        // slots is how duplicate binds happened.
+                        let owned = self.pad_bind.iter().any(|v| v.contains(&(ch, note)));
+                        if !owned {
+                            self.pad_bind[i].push((ch, note));
+                            self.pad_learn = if i + 1 < triggers::PADS {
+                                Some(i + 1)
+                            } else {
+                                None
+                            };
+                            self.save_bindings();
+                        }
                         continue;
                     }
-                    if let Some(i) = self.pad_bind.iter().position(|b| *b == Some((ch, note))) {
+                    if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.press(i, self.clock.beat());
                     }
                 }
                 midi::MidiEvent::NoteOff { ch, note } => {
-                    if let Some(i) = self.pad_bind.iter().position(|b| *b == Some((ch, note))) {
+                    if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.release(i);
                     }
                 }
