@@ -7,6 +7,7 @@ mod font;
 mod graphics;
 mod jog;
 mod link;
+mod lyrics;
 mod midi;
 mod pixfx;
 mod rng;
@@ -71,6 +72,8 @@ struct App {
     audio_err: Option<String>,
     /// Fold window for audio detection; cycled with 'r'.
     bpm_window: (u32, u32),
+    /// Timed lyric cards, when a .lrc is present.
+    lyrics: lyrics::Lyrics,
     /// Jog wheels, one per deck, scrubbing beat time.
     jogs: [jog::Jog; 4],
     jog_bind: [Option<(u8, u8)>; 4],
@@ -111,7 +114,7 @@ struct App {
 }
 
 impl App {
-    fn new(plates: Vec<assets::Plate>, text: String) -> Self {
+    fn new(plates: Vec<assets::Plate>, text: String, lyrics: lyrics::Lyrics) -> Self {
         let bindings = config::load(std::path::Path::new(config::PATH));
         let plates = std::rc::Rc::new(plates);
         let mut effects: Vec<Box<dyn Effect>> = vec![
@@ -134,6 +137,7 @@ impl App {
             audio_sync: false,
             audio_err: None,
             bpm_window: (85, 170),
+            lyrics,
             jogs: Default::default(),
             jog_bind: bindings.jogs,
             jog_touch_bind: bindings.jog_touch,
@@ -200,6 +204,17 @@ impl App {
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
+            KeyCode::Char('y') => {
+                // Mark the track start — the lyric clock is track time,
+                // not beat time, so it needs its own downbeat.
+                if self.lyrics.enabled {
+                    self.lyrics.stop();
+                } else if !self.lyrics.is_empty() {
+                    self.lyrics.start();
+                }
+            }
+            KeyCode::Char('[') => self.lyrics.nudge(-0.25),
+            KeyCode::Char(']') => self.lyrics.nudge(0.25),
             KeyCode::Char('g') => self.gfx = !self.gfx,
             KeyCode::Char('p') => self.pix = (self.pix + 1) % PIX_FX.len(),
             KeyCode::Char('x') => {
@@ -307,6 +322,27 @@ impl App {
         if let KeyCode::F(n @ 1..=8) = code {
             self.triggers.release(n as usize - 1);
         }
+    }
+
+    /// Draw the current lyric line, with the previous/next dimmed above
+    /// and below. Enhanced LRC fills the line word by word as it's sung.
+    fn render_lyrics(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        area: ratatui::layout::Rect,
+        ctx: &FrameCtx,
+    ) {
+        let Some((line, prog)) = self.lyrics.current() else {
+            return;
+        };
+        // Word timings give a real fill; without them, ride the line's
+        // own duration so the text still sweeps in time.
+        let lit = if line.words.is_empty() {
+            prog
+        } else {
+            self.lyrics.words_done() as f64 / line.words.len() as f64
+        };
+        effects::draw_text(buf, area, ctx, &line.text, 0.5, 1.0, lit, true);
     }
 
     /// Combined scrub from every jog, in beats.
@@ -590,6 +626,7 @@ impl App {
             }
         }
         self.triggers.post(frame.buffer_mut(), stage, vbeat);
+        self.render_lyrics(frame.buffer_mut(), stage, &ctx);
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
 
         if !self.hud_visible {
@@ -740,6 +777,11 @@ fn main() -> std::io::Result<()> {
         .nth(2)
         .unwrap_or_else(|| "KITTY-VJ".to_string());
     let plates = assets::load(std::path::Path::new(&assets_dir));
+    // Optional third arg names a lyric file: lyrics/<name>.lrc
+    let lyrics = match std::env::args().nth(3) {
+        Some(name) => lyrics::Lyrics::load(std::path::Path::new("lyrics"), &name),
+        None => lyrics::Lyrics::new(Vec::new()),
+    };
 
     // Keep the display awake for the length of the set — a projector
     // going to sleep mid-show is the classic HDMI gig failure. Dies
@@ -757,7 +799,7 @@ fn main() -> std::io::Result<()> {
         std::io::stdout(),
         event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     );
-    let mut app = App::new(plates, text);
+    let mut app = App::new(plates, text, lyrics);
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;

@@ -23,7 +23,7 @@ pub use plate::PlateFx;
 pub use pulse::Pulse;
 pub use rain::Rain;
 pub use sparks::Sparks;
-pub use text::TextOverlay;
+pub use text::{TextOverlay, draw_text};
 pub use tunnel::Tunnel;
 
 /// Everything an effect is allowed to know about the world.
