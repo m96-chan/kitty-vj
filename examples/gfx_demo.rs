@@ -10,8 +10,12 @@
 
 #[path = "../src/graphics.rs"]
 mod graphics;
+#[allow(dead_code)]
 #[path = "../src/pixfx.rs"]
 mod pixfx;
+#[allow(dead_code)]
+#[path = "../src/rng.rs"]
+mod rng;
 
 use std::io::Write;
 use std::time::Instant;
@@ -29,27 +33,31 @@ fn main() {
     let _ = write!(out, "\x1b[2J\x1b[?25l"); // clear, hide cursor
     let _ = out.flush();
 
+    // Uncapped: measure the true ceiling of the direct medium. A frame
+    // budget cap belongs in the real app, not this probe.
     let start = Instant::now();
     let tempo = 128.0;
     let mut frames = 0u32;
-    while start.elapsed().as_secs_f64() < 15.0 {
+    let mut worst = 0.0f64;
+    while start.elapsed().as_secs_f64() < 10.0 {
+        let t0 = Instant::now();
         let beat = start.elapsed().as_secs_f64() * tempo / 60.0;
         pixfx::plasma(&mut fb, beat, 0.8);
         if graphics::transmit_direct(&mut out, &fb, 1).is_err() {
             break;
         }
         frames += 1;
-        // ~30 fps pacing for the direct medium.
-        std::thread::sleep(std::time::Duration::from_millis(33));
+        worst = worst.max(t0.elapsed().as_secs_f64() * 1000.0);
     }
 
     let _ = graphics::clear_all(&mut out);
     let _ = write!(out, "\x1b[?25h\x1b[2J\x1b[H"); // show cursor, clear
     let _ = out.flush();
     eprintln!(
-        "{frames} frames in {:.1}s ({:.1} fps) at {}x{}",
+        "{frames} frames in {:.1}s ({:.1} fps, worst {:.1}ms) at {}x{}",
         start.elapsed().as_secs_f64(),
         frames as f64 / start.elapsed().as_secs_f64(),
+        worst,
         fb.w,
         fb.h
     );

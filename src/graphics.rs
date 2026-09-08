@@ -63,13 +63,31 @@ const CHUNK: usize = 4096; // base64 bytes per escape, per the spec
 
 /// Transmit + display a frame over the direct (escape) medium, replacing
 /// the previous frame with the same image id. Wrapped in synchronized
-/// output so the swap is atomic.
+/// output so the swap is atomic. Full-screen at the cursor.
 pub fn transmit_direct(out: &mut impl Write, fb: &Framebuffer, id: u32) -> io::Result<()> {
+    transmit_placed(out, fb, id, 0, 0)
+}
+
+/// As `transmit_direct`, but scaled into a `cols`x`rows` cell box at the
+/// current cursor position (0 = the image's native cell size). This is
+/// how the pixel stage drops into the terminal's cell grid, leaving the
+/// HUD row for text.
+pub fn transmit_placed(
+    out: &mut impl Write,
+    fb: &Framebuffer,
+    id: u32,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
     let b64 = base64(&fb.px);
-    // begin synchronized update, home the cursor so the image lands top-left
     out.write_all(b"\x1b[?2026h\x1b[H")?;
-    // delete the previous image (and its placements) under this id
     write!(out, "\x1b_Ga=d,d=i,i={id},q=2\x1b\\")?;
+
+    let placement = if cols > 0 && rows > 0 {
+        format!(",c={cols},r={rows}")
+    } else {
+        String::new()
+    };
 
     let bytes = b64.as_bytes();
     let mut off = 0;
@@ -78,10 +96,9 @@ pub fn transmit_direct(out: &mut impl Write, fb: &Framebuffer, id: u32) -> io::R
         let end = (off + CHUNK).min(bytes.len());
         let more = if end < bytes.len() { 1 } else { 0 };
         if first {
-            // a=T transmit-and-display, f=24 RGB, s/v dimensions
             write!(
                 out,
-                "\x1b_Ga=T,f=24,s={},v={},i={},q=2,m={};",
+                "\x1b_Ga=T,f=24,s={},v={},i={},q=2{placement},m={};",
                 fb.w, fb.h, id, more
             )?;
             first = false;
@@ -92,7 +109,7 @@ pub fn transmit_direct(out: &mut impl Write, fb: &Framebuffer, id: u32) -> io::R
         out.write_all(b"\x1b\\")?;
         off = end;
     }
-    out.write_all(b"\x1b[?2026l")?; // end synchronized update
+    out.write_all(b"\x1b[?2026l")?;
     out.flush()
 }
 

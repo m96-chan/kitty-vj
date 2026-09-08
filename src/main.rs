@@ -46,6 +46,14 @@ struct Channel {
 
 const CHANNELS: usize = 4;
 
+/// Pixel effects available in the graphics tier, with display names.
+type PixFn = fn(&mut graphics::Framebuffer, f64, f64);
+const PIX_FX: [(&str, PixFn); 3] = [
+    ("PLASMA", pixfx::plasma),
+    ("TUNNEL", pixfx::tunnel),
+    ("STARS", pixfx::starfield),
+];
+
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
 /// whole ticks so a run is a pure function of (seed, tick count).
 const TICK: f64 = 1.0 / 120.0;
@@ -81,6 +89,13 @@ struct App {
     pad_learn: Option<usize>,
     last_note: Option<(u8, u8)>,
     scratch: Vec<ratatui::buffer::Buffer>,
+    /// Graphics tier: full-pixel rendering over the kitty protocol.
+    gfx: bool,
+    gfx_fb: graphics::Framebuffer,
+    /// Which pixel effect (index into PIX_FX) when in graphics mode.
+    pix: usize,
+    /// Stage cell rect from the last draw, for image placement.
+    stage_cells: (u16, u16),
     intensity: f64,
     /// HUD off = clean feed for the projector.
     hud_visible: bool,
@@ -139,6 +154,10 @@ impl App {
             pad_learn: None,
             last_note: None,
             scratch: Vec::new(),
+            gfx: false,
+            gfx_fb: graphics::Framebuffer::new(1, 1),
+            pix: 0,
+            stage_cells: (0, 0),
             intensity: 0.5,
             hud_visible: true,
             render_ms: 0.0,
@@ -170,6 +189,7 @@ impl App {
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
+            KeyCode::Char('g') => self.gfx = !self.gfx,
             KeyCode::Char('x') => {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
                 if !self.scfx_on {
@@ -245,7 +265,11 @@ impl App {
             }
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
-                if i < self.effects.len() {
+                if self.gfx {
+                    if i < PIX_FX.len() {
+                        self.pix = i;
+                    }
+                } else if i < self.effects.len() {
                     self.channels[self.focus].slot = i;
                 }
             }
@@ -397,6 +421,28 @@ impl App {
         }
     }
 
+    /// Render the active pixel effect and ship it to kitty, scaled into
+    /// the stage's cell box. Called after ratatui's draw so the image
+    /// lands over the blank stage cells, HUD row left as text below.
+    fn render_pixels(&mut self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        let (cols, rows) = self.stage_cells;
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+        // Cap the long edge; a cell is ~1:2, so the box is cols : rows*2
+        // in pixel aspect. Keep circles round by matching that ratio.
+        let long = 720u32;
+        let (pw, ph) = if cols as u32 >= rows as u32 * 2 {
+            (long, (long * rows as u32 * 2 / cols as u32).max(1))
+        } else {
+            ((long * cols as u32 / (rows as u32 * 2)).max(1), long)
+        };
+        self.gfx_fb.resize(pw, ph);
+        let beat = self.triggers.warp_beat(self.clock.beat());
+        PIX_FX[self.pix].1(&mut self.gfx_fb, beat, self.intensity);
+        graphics::transmit_placed(out, &self.gfx_fb, 1, cols, rows)
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         // HUD hidden: the stage takes the whole screen — a clean feed
         // for the HDMI projector. The operator's info lives on the last
@@ -415,15 +461,26 @@ impl App {
             intensity: self.intensity,
         };
 
+        // Graphics tier: the stage cells stay blank (ratatui paints the
+        // default background), and the pixel image is placed over exactly
+        // that cell rect after this draw — see the main loop. The HUD row
+        // below the image survives as text. Skip cell compositing.
+        self.stage_cells = (stage.width, stage.height);
+        let skip_cells = self.gfx;
+
         // Mix the channels like a mixer sums audio: per cell, every
         // channel that drew something enters a lottery weighted by its
         // fader, with the leftover weight going to background. Four
         // faders at full = a quarter of the cells each; one fader alone
         // at 30% = 30% of its cells. The per-cell hash is fixed, so the
         // allocation is stable frame to frame instead of boiling.
-        let active: Vec<usize> = (0..CHANNELS)
-            .filter(|&i| self.channels[i].level > 0.004)
-            .collect();
+        let active: Vec<usize> = if skip_cells {
+            Vec::new()
+        } else {
+            (0..CHANNELS)
+                .filter(|&i| self.channels[i].level > 0.004)
+                .collect()
+        };
         if self.scratch.len() != CHANNELS || self.scratch[0].area != stage {
             self.scratch = (0..CHANNELS)
                 .map(|_| ratatui::buffer::Buffer::empty(stage))
@@ -495,26 +552,29 @@ impl App {
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
-        let decks: String = self
-            .channels
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let mark = if i == self.focus { '*' } else { ' ' };
-                let col = if (c.color - 0.5).abs() > 0.04 {
-                    format!("~{:.0}", c.color * 100.0)
-                } else {
-                    String::new()
-                };
-                format!(
-                    "{mark}{}:{}·{:.0}{col}",
-                    i + 1,
-                    self.effects[c.slot].name(),
-                    c.level * 100.0
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let decks: String = if self.gfx {
+            format!("GFX {} {:.0}%", PIX_FX[self.pix].0, self.intensity * 100.0)
+        } else {
+            self.channels
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let mark = if i == self.focus { '*' } else { ' ' };
+                    let col = if (c.color - 0.5).abs() > 0.04 {
+                        format!("~{:.0}", c.color * 100.0)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{mark}{}:{}·{:.0}{col}",
+                        i + 1,
+                        self.effects[c.slot].name(),
+                        c.level * 100.0
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let aud = if let Some(e) = &self.audio_err {
             format!(" │ AUD! {e}")
         } else if let Some(a) = &self.audio {
@@ -573,7 +633,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o h a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g x b o h a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -639,6 +699,7 @@ fn main() -> std::io::Result<()> {
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;
+    let mut gfx_was_on = false;
 
     let result = loop {
         if app.quit {
@@ -668,6 +729,15 @@ fn main() -> std::io::Result<()> {
 
         let t0 = Instant::now();
         terminal.draw(|f| app.draw(f))?;
+        // Graphics tier: place the pixel stage over the blank stage cells
+        // ratatui just drew. Leaving gfx mode clears the image once.
+        if app.gfx {
+            app.render_pixels(&mut std::io::stdout().lock())?;
+            gfx_was_on = true;
+        } else if gfx_was_on {
+            let _ = graphics::clear_all(&mut std::io::stdout().lock());
+            gfx_was_on = false;
+        }
         let draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
         app.render_ms = if app.render_ms == 0.0 {
             draw_ms
