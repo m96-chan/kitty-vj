@@ -36,6 +36,9 @@ pub struct FrameCtx {
     pub bar_phase: f64,
     /// Global intensity fader, [0, 1]. Keyboard now, MIDI CC later.
     pub intensity: f64,
+    /// Drive signals — grid pulses, kick measure, onset flinch. Effects
+    /// ported from EasyPngVJ are written against these, not raw phase.
+    pub drive: crate::drive::Drive,
 }
 
 impl FrameCtx {

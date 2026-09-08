@@ -23,9 +23,11 @@ impl Effect for Pulse {
         // Terminal cells are ~1:2, so weigh y double for a circular field.
         let max_d = (cx * cx + (cy * 2.0) * (cy * 2.0)).sqrt();
 
-        // Beat energy decays over the beat; bar downbeat hits harder.
-        let decay = (1.0 - ctx.phase).powi(2);
-        let bar_boost = if ctx.bar_phase < 1.0 { 0.35 } else { 0.0 };
+        // Grid pulses instead of raw phase: the decay curve and the bar
+        // emphasis now come from the shared drive signals, so a
+        // breakdown calms this the same way it calms everything else.
+        let decay = ctx.drive.gbeat();
+        let bar_boost = 0.35 * ctx.drive.gbar();
         let energy = (0.25 + 0.75 * decay + bar_boost) * (0.4 + 0.6 * ctx.intensity);
 
         // Ring expands outward across the beat.

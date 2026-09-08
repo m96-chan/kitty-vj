@@ -6,6 +6,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
+use crate::drive::Drive;
+
 pub const PADS: usize = 8;
 pub const PAD_NAMES: [&str; PADS] = [
     "roll", "sweep", "flanger", "vbreak", "backspin", "trans", "reverb", "echo",
@@ -38,6 +40,66 @@ fn scale(c: Color, k: f64) -> Color {
         ),
         other => other,
     }
+}
+
+/// Beat hits ported from EasyPngVJ's `hits` pool — momentary, driven by
+/// the grid pulses rather than raw phase so the numbers match.
+///
+/// `invertflash` inverts on a strong beat, `colorflash` washes the accent
+/// in on the bar, `strobe` fires on the first fraction of each eighth.
+pub fn beat_hits(
+    buf: &mut Buffer,
+    area: Rect,
+    d: &Drive,
+    beat: f64,
+    intensity: f64,
+    accent: (u8, u8, u8),
+) {
+    let invert = d.gbeat() > 0.72;
+    let flash = 0.35 * d.gbar() * intensity;
+    // First 14% of each eighth, as over there.
+    let eighth = (beat * 2.0).rem_euclid(1.0);
+    let strobe = if eighth < 0.14 {
+        (0.10 + 0.22 * intensity) * intensity
+    } else {
+        0.0
+    };
+    if !invert && flash < 0.01 && strobe < 0.01 {
+        return;
+    }
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &mut buf[(area.x + x, area.y + y)];
+            cell.fg = hit_colour(cell.fg, invert, flash, strobe, accent);
+            cell.bg = hit_colour(cell.bg, invert, flash, strobe, accent);
+        }
+    }
+}
+
+fn hit_colour(c: Color, invert: bool, flash: f64, strobe: f64, accent: (u8, u8, u8)) -> Color {
+    let Color::Rgb(r, g, b) = c else { return c };
+    let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
+    if invert {
+        r = 255.0 - r;
+        g = 255.0 - g;
+        b = 255.0 - b;
+    }
+    if flash > 0.0 {
+        // Additive accent, the `lighter` composite over there.
+        r += accent.0 as f64 * flash;
+        g += accent.1 as f64 * flash;
+        b += accent.2 as f64 * flash;
+    }
+    if strobe > 0.0 {
+        r += 255.0 * strobe;
+        g += 255.0 * strobe;
+        b += 255.0 * strobe;
+    }
+    Color::Rgb(
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+    )
 }
 
 fn blank(buf: &Buffer, x: u16, y: u16) -> bool {

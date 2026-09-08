@@ -2,12 +2,14 @@ mod assets;
 mod audio;
 mod clock;
 mod config;
+mod drive;
 mod effects;
 mod font;
 mod generate;
 mod graphics;
 mod jog;
 mod link;
+mod looks;
 mod lyrics;
 mod midi;
 mod pixfx;
@@ -73,6 +75,13 @@ struct App {
     audio_err: Option<String>,
     /// Fold window for audio detection; cycled with 'r'.
     bpm_window: (u32, u32),
+    /// Persistent colour treatment over the whole mix ('w' cycles).
+    look: looks::Look,
+    /// Per-scene random hue for duotone, and the palette accent for lut.
+    hue_base: f64,
+    accent: (u8, u8, u8),
+    /// Drive signals derived from the clock (and audio when running).
+    drive: drive::Drive,
     /// Generative plugins; empty until an adapter is registered (#17).
     /// Disabled by default — 'k' is the kill switch either way.
     ai: generate::Registry,
@@ -141,6 +150,10 @@ impl App {
             audio_sync: false,
             audio_err: None,
             bpm_window: (85, 170),
+            look: looks::Look::Plain,
+            hue_base: 210.0,
+            accent: (0, 255, 213),
+            drive: drive::Drive::default(),
             ai: generate::Registry::default(),
             lyrics,
             jogs: Default::default(),
@@ -209,6 +222,11 @@ impl App {
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
+            KeyCode::Char('w') => {
+                self.look = self.look.next();
+                // A fresh hue each time duotone comes round.
+                self.hue_base = (self.hue_base + 47.0).rem_euclid(360.0);
+            }
             KeyCode::Char('k') => {
                 // Kill switch: cuts every generator for the rest of the
                 // set. Nothing downstream may block on them anyway.
@@ -379,6 +397,27 @@ impl App {
         for j in &mut self.jogs {
             j.tick(dt);
         }
+    }
+
+    /// Advance the drive signals. Audio contributes kick/groove/onset
+    /// when A-mode is running; otherwise the clock alone drives them.
+    fn tick_drive(&mut self, dt: f64) {
+        let audio = if self.audio_sync {
+            self.audio
+                .as_ref()
+                .and_then(|a| a.estimate())
+                .map(|est| drive::AudioDrive {
+                    // Confidence stands in for beat presence until the
+                    // analyser exposes crest factor directly.
+                    thump: (est.confidence - 1.0).clamp(0.0, 1.5) / 1.5,
+                    groove: ((est.confidence - 1.0) / 1.5).clamp(0.0, 1.0),
+                    hit: false,
+                })
+        } else {
+            None
+        };
+        let beat = self.clock.beat();
+        self.drive.update(dt, beat, audio);
     }
 
     /// Persist current CC bindings to the gig config next to the app.
@@ -573,6 +612,7 @@ impl App {
             phase: vbeat.rem_euclid(1.0),
             bar_phase: vbeat.rem_euclid(4.0),
             intensity: self.intensity,
+            drive: self.drive,
         };
 
         // Graphics tier composites UNDER the cells: the pixel image goes
@@ -631,6 +671,26 @@ impl App {
                         let mut cell = self.scratch[i][(ax, ay)].clone();
                         // The winning channel's COLOR knob shades its
                         // cells — only while the SCFX section is lit.
+                        {
+                            cell.fg = looks::apply(
+                                cell.fg,
+                                self.look,
+                                &self.drive,
+                                vbeat,
+                                y,
+                                self.hue_base,
+                                self.accent,
+                            );
+                            cell.bg = looks::apply(
+                                cell.bg,
+                                self.look,
+                                &self.drive,
+                                vbeat,
+                                y,
+                                self.hue_base,
+                                self.accent,
+                            );
+                        }
                         if self.scfx_on {
                             scfx::apply(
                                 &mut cell,
@@ -649,6 +709,14 @@ impl App {
                 // r beyond every contender lands in the background share.
             }
         }
+        triggers::beat_hits(
+            frame.buffer_mut(),
+            stage,
+            &self.drive,
+            vbeat,
+            self.intensity,
+            self.accent,
+        );
         self.triggers.post(frame.buffer_mut(), stage, vbeat);
         self.render_lyrics(frame.buffer_mut(), stage, &ctx);
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
@@ -667,13 +735,18 @@ impl App {
         if self.jogs.iter().any(|j| j.active()) {
             trig_seg.push_str(&format!(" ↻{:+.2}", self.jog_offset()));
         }
+        let look_seg = if self.look != looks::Look::Plain {
+            format!("{} ", self.look.name())
+        } else {
+            String::new()
+        };
         let gfx_seg = if self.gfx {
             format!("▓{} ", PIX_FX[self.pix].0)
         } else {
             String::new()
         };
         let decks: String = format!(
-            "{gfx_seg}{}",
+            "{look_seg}{gfx_seg}{}",
             self.channels
                 .iter()
                 .enumerate()
@@ -756,7 +829,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h y k a r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p w x b o h y k a r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -856,7 +929,9 @@ fn main() -> std::io::Result<()> {
         }
         app.consume_ai();
         app.process_midi();
-        app.tick_jogs(now.duration_since(prev_frame).as_secs_f64());
+        let frame_dt = now.duration_since(prev_frame).as_secs_f64();
+        app.tick_jogs(frame_dt);
+        app.tick_drive(frame_dt);
         prev_frame = now;
         app.sync();
 
