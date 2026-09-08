@@ -6,6 +6,7 @@ mod font;
 mod link;
 mod midi;
 mod rng;
+mod xfade;
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,13 @@ use clock::{ClockSource, InternalClock, TapTempo};
 use effects::{
     Collapse, Cube, Effect, FrameCtx, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
 };
+
+#[derive(Clone, Copy, PartialEq)]
+enum LearnTarget {
+    Off,
+    Intensity,
+    Xfade,
+}
 
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
 /// whole ticks so a run is a pure function of (seed, tick count).
@@ -38,15 +46,19 @@ struct App {
     midi: Option<midi::MidiIn>,
     midi_clock: midi::MidiClock,
     midi_clock_sync: bool,
-    /// (channel, cc) bound to the intensity fader via learn.
-    cc_bind: Option<(u8, u8)>,
-    learn_armed: bool,
+    cc_bind_int: Option<(u8, u8)>,
+    cc_bind_xf: Option<(u8, u8)>,
+    learn: LearnTarget,
     last_cc: Option<(u8, u8, u8)>,
     link: Option<link::LinkSync>,
     link_sync: bool,
-    current: usize,
-    /// Effect switch requested; applied on the next bar line.
-    pending: Option<usize>,
+    /// A/B decks: indices into `effects`. The crossfader mixes them.
+    slot_a: usize,
+    slot_b: usize,
+    /// Crossfader position: 0 = full A, 1 = full B.
+    xfade_pos: f64,
+    xstyle: xfade::XfadeStyle,
+    scratch: Option<ratatui::buffer::Buffer>,
     intensity: f64,
     render_ms: f64, // EWMA of draw time
     quit: bool,
@@ -78,13 +90,17 @@ impl App {
             midi: midi::MidiIn::open().ok(),
             midi_clock: midi::MidiClock::new(),
             midi_clock_sync: false,
-            cc_bind: None,
-            learn_armed: false,
+            cc_bind_int: None,
+            cc_bind_xf: None,
+            learn: LearnTarget::Off,
             last_cc: None,
             link: None,
             link_sync: false,
-            current: 0,
-            pending: None,
+            slot_a: 0,
+            slot_b: 1,
+            xfade_pos: 0.0,
+            xstyle: xfade::XfadeStyle::Dissolve,
+            scratch: None,
             intensity: 0.5,
             render_ms: 0.0,
             quit: false,
@@ -104,8 +120,12 @@ impl App {
             KeyCode::Char('-') => self.clock.nudge_tempo(-0.5),
             KeyCode::Up => self.intensity = (self.intensity + 0.05).min(1.0),
             KeyCode::Down => self.intensity = (self.intensity - 0.05).max(0.0),
+            KeyCode::Left => self.xfade_pos = (self.xfade_pos - 0.05).max(0.0),
+            KeyCode::Right => self.xfade_pos = (self.xfade_pos + 0.05).min(1.0),
+            KeyCode::Char('t') => self.xstyle = self.xstyle.next(),
             KeyCode::Tab => {
-                self.pending = Some((self.current + 1) % self.effects.len());
+                let next = (self.visible_slot() + 1) % self.effects.len();
+                self.load_hidden(next);
             }
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('a') => {
@@ -128,7 +148,12 @@ impl App {
             }
             KeyCode::Char('m') => {
                 if self.midi.is_some() {
-                    self.learn_armed = !self.learn_armed;
+                    // Cycle the learn target: off → intensity → xfade.
+                    self.learn = match self.learn {
+                        LearnTarget::Off => LearnTarget::Intensity,
+                        LearnTarget::Intensity => LearnTarget::Xfade,
+                        LearnTarget::Xfade => LearnTarget::Off,
+                    };
                 }
             }
             KeyCode::Char('c') => {
@@ -153,15 +178,41 @@ impl App {
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.effects.len() {
-                    self.pending = Some(i);
+                    self.load_hidden(i);
                 }
             }
             _ => {
-                // Aim at the queued effect if a switch is pending — the
-                // operator is already playing the thing they just picked.
-                let target = self.pending.unwrap_or(self.current);
+                // Unclaimed keys go to the hidden deck — the operator is
+                // prepping the thing they're about to fade in.
+                let target = self.hidden_slot();
                 self.effects[target].on_key(code);
             }
+        }
+    }
+
+    /// The deck contributing more of the picture.
+    fn visible_slot(&self) -> usize {
+        if self.xfade_pos < 0.5 {
+            self.slot_a
+        } else {
+            self.slot_b
+        }
+    }
+
+    /// The deck the audience mostly can't see — where new effects load.
+    fn hidden_slot(&self) -> usize {
+        if self.xfade_pos < 0.5 {
+            self.slot_b
+        } else {
+            self.slot_a
+        }
+    }
+
+    fn load_hidden(&mut self, i: usize) {
+        if self.xfade_pos < 0.5 {
+            self.slot_b = i;
+        } else {
+            self.slot_a = i;
         }
     }
 
@@ -172,12 +223,22 @@ impl App {
             match ev {
                 midi::MidiEvent::Cc { ch, cc, val } => {
                     self.last_cc = Some((ch, cc, val));
-                    if self.learn_armed {
-                        self.cc_bind = Some((ch, cc));
-                        self.learn_armed = false;
+                    match self.learn {
+                        LearnTarget::Intensity => {
+                            self.cc_bind_int = Some((ch, cc));
+                            self.learn = LearnTarget::Off;
+                        }
+                        LearnTarget::Xfade => {
+                            self.cc_bind_xf = Some((ch, cc));
+                            self.learn = LearnTarget::Off;
+                        }
+                        LearnTarget::Off => {}
                     }
-                    if self.cc_bind == Some((ch, cc)) {
+                    if self.cc_bind_int == Some((ch, cc)) {
                         self.intensity = val as f64 / 127.0;
+                    }
+                    if self.cc_bind_xf == Some((ch, cc)) {
+                        self.xfade_pos = val as f64 / 127.0;
                     }
                 }
                 midi::MidiEvent::Clock(at) => self.midi_clock.tick(at),
@@ -227,18 +288,6 @@ impl App {
         }
     }
 
-    /// Apply a pending effect switch when the bar line passes.
-    fn maybe_switch(&mut self, prev_beat: f64) {
-        if let Some(next) = self.pending {
-            let crossed_bar = (self.clock.beat() / 4.0).floor() > (prev_beat / 4.0).floor();
-            // Immediate if we're idle at the very start; otherwise on the bar.
-            if crossed_bar || self.clock.beat() < 0.01 {
-                self.current = next;
-                self.pending = None;
-            }
-        }
-    }
-
     fn draw(&mut self, frame: &mut Frame) {
         let [stage, hud] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
@@ -250,19 +299,51 @@ impl App {
             bar_phase: self.clock.phase(4.0),
             intensity: self.intensity,
         };
-        self.effects[self.current].render(frame.buffer_mut(), stage, &ctx);
+
+        // A/B composite. Endpoints skip the second render entirely.
+        let t = self.xfade_pos;
+        if t <= 0.005 || self.slot_a == self.slot_b {
+            self.effects[self.slot_a].render(frame.buffer_mut(), stage, &ctx);
+        } else if t >= 0.995 {
+            self.effects[self.slot_b].render(frame.buffer_mut(), stage, &ctx);
+        } else {
+            self.effects[self.slot_a].render(frame.buffer_mut(), stage, &ctx);
+            // Deck B renders offscreen; the mask copies its cells over.
+            let scratch = match &mut self.scratch {
+                Some(b) if b.area == stage => {
+                    b.reset();
+                    b
+                }
+                _ => {
+                    self.scratch = Some(ratatui::buffer::Buffer::empty(stage));
+                    self.scratch.as_mut().unwrap()
+                }
+            };
+            self.effects[self.slot_b].render(scratch, stage, &ctx);
+            for y in 0..stage.height {
+                for x in 0..stage.width {
+                    if self.xstyle.shows_b(x, y, stage.width, stage.height, t) {
+                        let (ax, ay) = (stage.x + x, stage.y + y);
+                        frame.buffer_mut()[(ax, ay)] = scratch[(ax, ay)].clone();
+                    }
+                }
+            }
+        }
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
 
         let bar = (beat / 4.0).floor() as i64 + 1;
         let beat_in_bar = ctx.bar_phase as i64 + 1;
-        let pending = self
-            .pending
-            .map(|i| format!(" → {}", self.effects[i].name()))
-            .unwrap_or_default();
-        let status = self.effects[self.current]
+        let status = self.effects[self.visible_slot()]
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
+        let decks = format!(
+            "A:{} {:>3.0}% B:{} {}",
+            self.effects[self.slot_a].name(),
+            self.xfade_pos * 100.0,
+            self.effects[self.slot_b].name(),
+            self.xstyle.name(),
+        );
         let aud = if let Some(e) = &self.audio_err {
             format!(" │ AUD! {e}")
         } else if let Some(a) = &self.audio {
@@ -292,11 +373,18 @@ impl App {
                 Some((ch, cc, val)) => format!(" cc{ch}.{cc}={val}"),
                 None => String::new(),
             };
-            let bind = match self.cc_bind {
-                Some((ch, cc)) => format!(" int←cc{ch}.{cc}"),
-                None => String::new(),
+            let mut bind = String::new();
+            if let Some((ch, cc)) = self.cc_bind_int {
+                bind.push_str(&format!(" int←cc{ch}.{cc}"));
+            }
+            if let Some((ch, cc)) = self.cc_bind_xf {
+                bind.push_str(&format!(" xf←cc{ch}.{cc}"));
+            }
+            let learn = match self.learn {
+                LearnTarget::Off => "",
+                LearnTarget::Intensity => " LEARN→int",
+                LearnTarget::Xfade => " LEARN→xf",
             };
-            let learn = if self.learn_armed { " LEARN" } else { "" };
             let mclk = match (self.midi_clock_sync, self.midi_clock.bpm()) {
                 (true, Some(b)) => format!(" ♻{b:.1}"),
                 (true, None) => " ♻--".to_string(),
@@ -307,13 +395,12 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ 1-{} o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ ←→ 1-{} t o a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
-            self.effects[self.current].name(),
+            decks,
             status,
-            pending,
             aud,
             lnk,
             mid,
@@ -361,14 +448,12 @@ fn main() -> std::io::Result<()> {
         let now = Instant::now();
         acc += now.duration_since(last).as_secs_f64();
         last = now;
-        let prev_beat = app.clock.beat();
         while acc >= TICK {
             app.clock.advance(TICK);
             acc -= TICK;
         }
         app.process_midi();
         app.sync();
-        app.maybe_switch(prev_beat);
 
         let t0 = Instant::now();
         terminal.draw(|f| app.draw(f))?;
