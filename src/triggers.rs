@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::drive::Drive;
+use crate::pass::rgb;
 
 pub const PADS: usize = 8;
 pub const PAD_NAMES: [&str; PADS] = [
@@ -95,11 +96,7 @@ fn hit_colour(c: Color, invert: bool, flash: f64, strobe: f64, accent: (u8, u8, 
         g += 255.0 * strobe;
         b += 255.0 * strobe;
     }
-    Color::Rgb(
-        r.clamp(0.0, 255.0) as u8,
-        g.clamp(0.0, 255.0) as u8,
-        b.clamp(0.0, 255.0) as u8,
-    )
+    rgb(r, g, b)
 }
 
 fn blank(buf: &Buffer, x: u16, y: u16) -> bool {

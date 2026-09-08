@@ -5,6 +5,8 @@
 
 use ratatui::style::Color;
 
+use crate::pass::{CellCtx, ColorPass};
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum ScfxType {
     Space,
@@ -161,19 +163,36 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16
     }
 }
 
-/// Apply to a cell's colors in place.
-#[allow(clippy::too_many_arguments)]
-pub fn apply(
-    cell: &mut ratatui::buffer::Cell,
-    t: ScfxType,
-    knob: f64,
-    beat: f64,
-    x: u16,
-    y: u16,
-    w: u16,
-) {
-    cell.fg = transform(cell.fg, t, knob, beat, x, y, w);
-    cell.bg = transform(cell.bg, t, knob, beat, x, y, w);
+/// The Transform shape. SCFX differs from a look only in where its
+/// depth comes from — a knob instead of a scene decision — so it wears
+/// the same trait, with the knob carried in the pass rather than the
+/// context (each channel has its own).
+pub struct Scfx {
+    pub kind: ScfxType,
+    /// COLOR knob, 0..1, 0.5 = neutral.
+    pub knob: f64,
+}
+
+impl ColorPass for Scfx {
+    fn name(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    fn amount(&self, _ctx: &CellCtx) -> f64 {
+        ((self.knob - 0.5) * 2.0).abs()
+    }
+
+    fn map(&self, c: Color, ctx: &CellCtx) -> Color {
+        transform(
+            c,
+            self.kind,
+            self.knob,
+            ctx.drive.gbeat(),
+            ctx.x,
+            ctx.y,
+            ctx.w,
+        )
+    }
 }
 
 #[cfg(test)]

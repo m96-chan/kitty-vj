@@ -1,5 +1,6 @@
 mod assets;
 mod audio;
+mod camera;
 mod clock;
 mod config;
 mod drive;
@@ -12,12 +13,14 @@ mod link;
 mod looks;
 mod lyrics;
 mod midi;
+mod pass;
 mod pixfx;
 mod pixparticles;
 mod pixpost;
 mod postfx;
 mod rng;
 mod scfx;
+mod transition;
 mod triggers;
 
 use std::time::{Duration, Instant};
@@ -33,6 +36,7 @@ use clock::{ClockSource, InternalClock, TapTempo};
 use effects::{
     Collapse, Cube, Effect, FrameCtx, ImgDust, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
 };
+use pass::ColorPass;
 
 #[derive(Clone, Copy, PartialEq)]
 enum LearnTarget {
@@ -786,36 +790,27 @@ impl App {
                         let mut cell = self.scratch[i][(ax, ay)].clone();
                         // The winning channel's COLOR knob shades its
                         // cells — only while the SCFX section is lit.
-                        {
-                            cell.fg = looks::apply(
-                                cell.fg,
-                                self.look,
-                                &self.drive,
-                                vbeat,
-                                y,
-                                self.hue_base,
-                                self.accent,
-                            );
-                            cell.bg = looks::apply(
-                                cell.bg,
-                                self.look,
-                                &self.drive,
-                                vbeat,
-                                y,
-                                self.hue_base,
-                                self.accent,
-                            );
-                        }
+                        // Both of these are the same shape — a colour in,
+                        // a colour out — so they run through one trait.
+                        // A look is a scene decision, an SCFX pass is a
+                        // knob; the pipeline doesn't care which.
+                        let cctx = pass::CellCtx {
+                            drive: &self.drive,
+                            t: vbeat,
+                            x,
+                            y,
+                            w: stage.width,
+                            intensity: self.intensity,
+                            hue_base: self.hue_base,
+                            accent: self.accent,
+                        };
+                        self.look.apply(&mut cell, &cctx);
                         if self.scfx_on {
-                            scfx::apply(
-                                &mut cell,
-                                self.scfx_type,
-                                self.channels[i].color,
-                                vbeat,
-                                x,
-                                y,
-                                stage.width,
-                            );
+                            let sc = scfx::Scfx {
+                                kind: self.scfx_type,
+                                knob: self.channels[i].color,
+                            };
+                            sc.apply(&mut cell, &cctx);
                         }
                         frame.buffer_mut()[(ax, ay)] = cell;
                         break;
@@ -883,8 +878,18 @@ impl App {
             trig_seg.push_str(&format!(" ↻{:+.2}", self.jog_offset()));
         }
         let look_seg = {
-            let mut s = if self.look != looks::Look::Plain {
-                format!("{} ", self.look.name())
+            let probe = pass::CellCtx {
+                drive: &self.drive,
+                t: beat,
+                x: 0,
+                y: 0,
+                w: stage.width,
+                intensity: self.intensity,
+                hue_base: self.hue_base,
+                accent: self.accent,
+            };
+            let mut s = if ColorPass::amount(&self.look, &probe) > 0.0 {
+                format!("{} ", ColorPass::name(&self.look))
             } else {
                 String::new()
             };

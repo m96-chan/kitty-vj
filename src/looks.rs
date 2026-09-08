@@ -6,6 +6,7 @@
 use ratatui::style::Color;
 
 use crate::drive::Drive;
+use crate::pass::{CellCtx, ColorPass, luma, rgb};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Look {
@@ -51,10 +52,6 @@ impl Look {
         let i = LOOKS.iter().position(|l| l == self).unwrap_or(0);
         LOOKS[(i + 1) % LOOKS.len()]
     }
-}
-
-fn luma(r: f64, g: f64, b: f64) -> f64 {
-    0.299 * r + 0.587 * g + 0.114 * b
 }
 
 fn contrast(v: f64, k: f64) -> f64 {
@@ -148,11 +145,24 @@ pub fn apply(
         }
     }
 
-    Color::Rgb(
-        r.clamp(0.0, 255.0) as u8,
-        g.clamp(0.0, 255.0) as u8,
-        b.clamp(0.0, 255.0) as u8,
-    )
+    rgb(r, g, b)
+}
+
+/// The Transform shape: a look is a per-cell colour transform, the same
+/// as an SCFX pass or a beat hit. Three ports arrived at this
+/// independently; the trait is where they finally agree.
+impl ColorPass for Look {
+    fn name(&self) -> &'static str {
+        Look::name(self)
+    }
+
+    fn amount(&self, _ctx: &CellCtx) -> f64 {
+        if *self == Look::Plain { 0.0 } else { 1.0 }
+    }
+
+    fn map(&self, c: Color, ctx: &CellCtx) -> Color {
+        apply(c, *self, ctx.drive, ctx.t, ctx.y, ctx.hue_base, ctx.accent)
+    }
 }
 
 fn saturate((r, g, b): (f64, f64, f64), k: f64) -> (f64, f64, f64) {

@@ -23,6 +23,16 @@ pub struct PlateFx {
     current: usize,
     pending: Option<usize>,
     last_bar: i64,
+    /// The plate we are transitioning away from, and when the mix
+    /// started. A swap is a Mixer: both plates are on screen at once.
+    outgoing: Option<usize>,
+    swap_beat: f64,
+    /// Camera modulator — parameters, not pixels; re-rolled per plate.
+    ken: crate::camera::KenBurns,
+    /// Phrase dive, layered on top of the drift.
+    punch: crate::camera::PunchIn,
+    /// Which mixer runs on the next plate swap.
+    trans: usize,
 }
 
 impl PlateFx {
@@ -32,6 +42,11 @@ impl PlateFx {
             current: 0,
             pending: None,
             last_bar: 0,
+            outgoing: None,
+            swap_beat: 0.0,
+            ken: crate::camera::KenBurns::roll(0, 0.0),
+            punch: crate::camera::PunchIn::new(1),
+            trans: 0,
         }
     }
 }
@@ -48,6 +63,10 @@ impl Effect for PlateFx {
                 self.pending = Some((self.pending.unwrap_or(self.current) + 1) % n);
                 true
             }
+            KeyCode::Char('t') => {
+                self.trans = (self.trans + 1) % crate::transition::TRANSITIONS.len();
+                true
+            }
             KeyCode::Char('p') => {
                 self.pending = Some((self.pending.unwrap_or(self.current) + n - 1) % n);
                 true
@@ -57,7 +76,11 @@ impl Effect for PlateFx {
     }
 
     fn status(&self) -> Option<String> {
-        let mut s = self.plates.get(self.current)?.name.clone();
+        let mut s = format!(
+            "{} {}",
+            crate::transition::TRANSITIONS[self.trans].name(),
+            self.plates.get(self.current)?.name
+        );
         if let Some(p) = self.pending {
             s.push_str(" → ");
             s.push_str(&self.plates[p].name);
@@ -73,26 +96,63 @@ impl Effect for PlateFx {
         // Bar-line bookkeeping: apply a queued change, auto-rotate on phrase.
         let bar = (ctx.beat / 4.0).floor() as i64;
         if bar != self.last_bar {
-            if let Some(next) = self.pending.take() {
-                self.current = next;
+            let next = if let Some(next) = self.pending.take() {
+                Some(next)
             } else if bar % AUTO_BARS == 0 && bar > self.last_bar {
-                self.current = (self.current + 1) % self.plates.len();
+                Some((self.current + 1) % self.plates.len())
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                // Keep the old plate around so the transition has two
+                // frames to mix; roll a fresh camera move for the new one.
+                self.outgoing = Some(self.current);
+                self.swap_beat = ctx.beat;
+                self.current = next;
+                self.ken = crate::camera::KenBurns::roll(next as u64, ctx.beat);
             }
             self.last_bar = bar;
         }
+
+        // Transition progress. Past the end the outgoing plate is done.
+        let tr = crate::transition::TRANSITIONS[self.trans];
+        let mix = if self.outgoing.is_some() {
+            let p = (ctx.beat - self.swap_beat) / tr.beats();
+            if p >= 1.0 {
+                self.outgoing = None;
+                1.0
+            } else {
+                p.max(0.0)
+            }
+        } else {
+            1.0
+        };
 
         let img = &self.plates[self.current].img;
         let (sw, sh) = (img.width() as f64, img.height() as f64);
         // Halfblock pixel grid: one column per cell, two rows per cell.
         let (tw, th) = (area.width as f64, area.height as f64 * 2.0);
 
-        // Cover fit, then the clocked camera on top.
+        // Cover fit, then the modulator's camera on top. Ken Burns keeps
+        // drifting through a breakdown by design; the punch is the beat.
+        let cam = {
+            use crate::camera::Modulator;
+            // Two modulators compose by multiplying zoom and taking the
+            // dive's focus while it is actually diving.
+            let base = self.ken.cam(ctx.beat, &ctx.drive);
+            let dive = self.punch.cam(ctx.beat, &ctx.drive);
+            let k = (dive.zoom - 1.0).clamp(0.0, 1.0);
+            crate::camera::Cam {
+                zoom: base.zoom * dive.zoom,
+                fx: base.fx + (dive.fx - base.fx) * k,
+                fy: base.fy + (dive.fy - base.fy) * k,
+            }
+        };
         let cover = (tw / sw).max(th / sh);
-        let punch = 1.0 + 0.10 * (1.0 - ctx.phase).powi(2) * (0.3 + 0.7 * ctx.intensity);
-        let zoom = cover * punch;
-        // Ken burns: slow deterministic drift of the focus point.
-        let drift_x = 0.06 * (ctx.beat * 0.071).sin() * sw;
-        let drift_y = 0.05 * (ctx.beat * 0.047).cos() * sh;
+        let punch = 1.0 + 0.10 * ctx.drive.gbeat() * (0.3 + 0.7 * ctx.intensity);
+        let zoom = cover * punch * cam.zoom;
+        let drift_x = (cam.fx - 0.5) * sw;
+        let drift_y = (cam.fy - 0.5) * sh;
 
         // Chroma split rides the beat decay.
         let chroma = 2.5 * (1.0 - ctx.phase).powi(2) * ctx.intensity;
@@ -112,11 +172,34 @@ impl Effect for PlateFx {
         // Invert flash on the downbeat when the fader is hot.
         let invert = ctx.intensity > 0.75 && ctx.bar_phase < 0.12;
 
-        let sample = |x: f64, y: f64| -> (u8, u8, u8) {
-            let sx = (x / zoom + sw / 2.0 + drift_x).clamp(0.0, sw - 1.0) as u32;
-            let sy = (y / zoom + sh / 2.0 + drift_y).clamp(0.0, sh - 1.0) as u32;
-            let p = img.get_pixel(sx, sy).0;
+        // The outgoing plate is sampled with the same camera — a cut
+        // that also moved the camera reads as two separate events.
+        let old = self.outgoing.map(|i| &self.plates[i].img);
+
+        let sample_from = |im: &image::RgbImage, x: f64, y: f64| -> (u8, u8, u8) {
+            let (iw, ih) = (im.width() as f64, im.height() as f64);
+            let sx = (x / zoom + iw / 2.0 + drift_x).clamp(0.0, iw - 1.0) as u32;
+            let sy = (y / zoom + ih / 2.0 + drift_y).clamp(0.0, ih - 1.0) as u32;
+            let p = im.get_pixel(sx, sy).0;
             (p[0], p[1], p[2])
+        };
+        let sample = |x: f64, y: f64| -> (u8, u8, u8) { sample_from(img, x, y) };
+
+        let px_at_img = |im: &image::RgbImage, px: f64, py: f64| -> (u8, u8, u8) {
+            let x = px - tw / 2.0
+                + if py >= slice_y0 && py < slice_y1 {
+                    slice_dx
+                } else {
+                    0.0
+                };
+            let y = py - th / 2.0;
+            let (_, g, b) = sample_from(im, x, y);
+            let (r, _, _) = sample_from(im, x + chroma, y);
+            if invert {
+                (255 - r, 255 - g, 255 - b)
+            } else {
+                (r, g, b)
+            }
         };
 
         let px_at = |px: f64, py: f64| -> (u8, u8, u8) {
@@ -139,8 +222,19 @@ impl Effect for PlateFx {
 
         for cy in 0..area.height {
             for cx in 0..area.width {
-                let top = px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 0.5);
-                let bot = px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 1.5);
+                // The Mixer decides, per cell, which plate wins.
+                let show_new = old.is_none() || tr.shows_b(cx, cy, area.width, area.height, mix);
+                let (top, bot) = match (show_new, old) {
+                    (true, _) => (
+                        px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 0.5),
+                        px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 1.5),
+                    ),
+                    (false, Some(o)) => (
+                        px_at_img(o, cx as f64 + 0.5, cy as f64 * 2.0 + 0.5),
+                        px_at_img(o, cx as f64 + 0.5, cy as f64 * 2.0 + 1.5),
+                    ),
+                    (false, None) => unreachable!("no outgoing plate"),
+                };
                 let cell = &mut buf[(area.x + cx, area.y + cy)];
                 cell.set_char('▀');
                 cell.set_fg(Color::Rgb(top.0, top.1, top.2));
