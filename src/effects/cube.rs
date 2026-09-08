@@ -54,6 +54,11 @@ const DEPTH_GLYPHS: &[char] = &['.', ':', '+', '*', '#', '@'];
 
 const DIST: f64 = 3.2;
 
+/// Width/height of one halfblock pixel as it lands on screen. 1.0 for
+/// the common 1:2 cell font; raise it if cubes render tall, lower if
+/// they render wide.
+const PX_ASPECT: f64 = 1.0;
+
 pub struct Cube {
     plates: Rc<Vec<Plate>>,
     /// Halfblock z/color buffer, reused across frames.
@@ -86,9 +91,10 @@ impl Cube {
         self.zbuf.resize(pw * ph, None);
 
         let (cx, cy) = (pw as f64 / 2.0, ph as f64 / 2.0);
-        // In the pixel grid a halfblock is ~1:1, x still reads half as
-        // wide as it is, so scale x by 2 to look square.
-        let unit = (pw as f64 / 4.0).min(ph as f64 / 4.0) * scale;
+        // A halfblock pixel (cell width x half a cell height) is close to
+        // square on a ~1:2 cell font, so both axes share one unit. Tweak
+        // PX_ASPECT if a font renders the cube visibly non-cubic.
+        let unit = (pw as f64).min(ph as f64) * scale * 0.32;
 
         let rx = ctx.beat * 0.45;
         let ry = ctx.beat * 0.70;
@@ -126,7 +132,10 @@ impl Cube {
 
             let project = |p: &[f64; 3]| -> (f64, f64) {
                 let persp = DIST / (DIST + p[2]);
-                (cx + p[0] * unit * 2.0 * persp, cy + p[1] * unit * persp)
+                (
+                    cx + p[0] * unit * PX_ASPECT * persp,
+                    cy + p[1] * unit * persp,
+                )
             };
 
             // Oversample against the longest projected edge to avoid holes.
