@@ -58,6 +58,16 @@ pub trait Effect {
     fn on_key(&mut self, _code: KeyCode) -> bool {
         false
     }
+    /// A new scene has been rolled. Units that care about the cast list
+    /// — the framing an artwork gets, the seed its moves derive from —
+    /// take it here; everything else ignores it. Defaulted so adding a
+    /// scene concept does not touch every effect.
+    fn on_scene(&mut self, _fit: crate::framing::Fit, _seed: u64) {}
+
+    /// The scene asked for a transition of a particular length; this is
+    /// the index it resolved to. Only units that mix two frames care.
+    fn on_transition(&mut self, _index: usize) {}
+
     /// Extra HUD text (e.g. current plate name).
     fn status(&self) -> Option<String> {
         None

@@ -6,6 +6,7 @@ mod config;
 mod drive;
 mod effects;
 mod font;
+mod framing;
 mod generate;
 mod graphics;
 mod jog;
@@ -19,7 +20,9 @@ mod pixparticles;
 mod pixpost;
 mod postfx;
 mod rng;
+mod scene;
 mod scfx;
+mod show;
 mod transition;
 mod triggers;
 
@@ -144,6 +147,15 @@ struct App {
     audio_err: Option<String>,
     /// Fold window for audio detection; cycled with 'r'.
     bpm_window: (u32, u32),
+    /// Scene director — orchestration: it decides which units are
+    /// active, and speaks only when the scene changes.
+    scenes: scene::SceneDirector,
+    /// Scene changes that had to fire off-grid. A set full of these
+    /// means the clock is wrong, so it is worth seeing.
+    escapes: u32,
+    /// Opening/closing sequences; their exports gate the rest.
+    show: show::Show,
+    show_state: show::ShowState,
     /// Persistent colour treatment over the whole mix ('w' cycles).
     look: looks::Look,
     /// Per-scene random hue for duotone, and the palette accent for lut.
@@ -227,6 +239,10 @@ impl App {
             audio_sync: false,
             audio_err: None,
             bpm_window: (85, 170),
+            scenes: scene::SceneDirector::new(scene::Style::Neon, 1),
+            escapes: 0,
+            show: show::Show::new(),
+            show_state: show::ShowState::neutral(),
             look: looks::Look::Plain,
             hue_base: 210.0,
             accent: (0, 255, 213),
@@ -303,6 +319,16 @@ impl App {
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
+            KeyCode::Char('S') => self.scenes.request(scene::ChangeReason::Manual),
+            KeyCode::Char('D') => {
+                // Cycle the artwork style: it changes which pools the
+                // next scene draws from, so it takes effect on the roll.
+                let next = self.scenes.style().next();
+                self.scenes.set_style(next);
+                self.scenes.request(scene::ChangeReason::TrackChange);
+            }
+            KeyCode::Char('A') => self.show.arm(),
+            KeyCode::Char('E') => self.show.play_out(),
             KeyCode::Char('w') => {
                 self.look = self.look.next();
                 // A fresh hue each time duotone comes round.
@@ -487,6 +513,98 @@ impl App {
     fn tick_jogs(&mut self, dt: f64) {
         for j in &mut self.jogs {
             j.tick(dt);
+        }
+    }
+
+    /// Advance the orchestration and the show sequences. A scene change
+    /// lands on a downbeat, so this runs before the draw that would show
+    /// it; the show is wall-clock, so it takes real dt.
+    fn tick_show(&mut self, dt: f64) {
+        let loud = if self.audio_sync {
+            self.audio
+                .as_ref()
+                .and_then(|a| a.estimate())
+                .map(|e| (e.confidence - 1.0).clamp(0.0, 1.0))
+                .unwrap_or(0.0)
+        } else {
+            // Without audio there is nothing to arm on, so a standby
+            // card would wait forever; treat the clock as the cue.
+            1.0
+        };
+        self.show_state = self.show.update(dt, loud);
+        // Rotation is expressed in seconds over there, so it has to
+        // follow the tempo here or a fast set would rotate twice as often.
+        self.scenes.set_tempo(self.clock.tempo());
+        // Automatic scene rotation is suspended outside the live stage,
+        // exactly as over there — nothing may interrupt an intro.
+        if self.show.is_live()
+            && let Some(change) = self.scenes.update(self.clock.beat())
+        {
+            // A track change reads as a change of chapter and takes a
+            // long transition; a rotation is an edit and takes a short
+            // one. The set of transitions stays ours; the scene only
+            // says which length it wants.
+            if let Some(tr) = change.length.pick(&transition::TRANSITIONS)
+                && let Some(i) = transition::TRANSITIONS
+                    .iter()
+                    .position(|t| t.name() == tr.name())
+            {
+                for e in &mut self.effects {
+                    e.on_transition(i);
+                }
+            }
+            if !change.on_downbeat {
+                // The escape hatch fired: the grid was unreliable enough
+                // that waiting for a downbeat would have stalled the set.
+                self.escapes += 1;
+            }
+            self.apply_scene(&change.scene);
+        }
+    }
+
+    /// Take a scene's cast list. The director hands over names, not
+    /// indices, so the tables stay the app's business — adding an effect
+    /// means adding a row here and a name there, not touching scene.rs.
+    fn apply_scene(&mut self, sc: &scene::Scene) {
+        self.look = sc.look();
+        self.hue_base = sc.hue_base;
+        self.accent = sc.accent;
+        // Posts: the scene names one of each kind, or none.
+        self.cell_post = 0;
+        self.pix_post = 0;
+        for p in &sc.posts {
+            if let Some(n) = p.cell_post()
+                && let Some(i) = CELL_POSTS.iter().position(|(name, _)| *name == n)
+            {
+                self.cell_post = i;
+            }
+            if let Some(n) = p.pix_post()
+                && let Some(i) = PIX_POSTS.iter().position(|(name, _)| *name == n)
+            {
+                self.pix_post = i;
+            }
+        }
+        self.part = sc
+            .particle
+            .name()
+            .and_then(|n| PIX_PARTICLES.iter().position(|(name, _)| *name == n));
+        // A hit that wants a cell-post slot takes it if the posts left
+        // one free — beat-momentary treatments read louder than a
+        // persistent one, so they win the slot.
+        for h in &sc.hits {
+            if let Some(n) = h.cell_post()
+                && let Some(i) = CELL_POSTS.iter().position(|(name, _)| *name == n)
+            {
+                self.cell_post = i;
+            }
+        }
+        // Units that care about the framing hear about it directly.
+        let fit = match sc.fit {
+            scene::Fit::Cover => framing::Fit::Cover,
+            scene::Fit::Contain => framing::Fit::Contain,
+        };
+        for e in &mut self.effects {
+            e.on_scene(fit, sc.seed);
         }
     }
 
@@ -851,6 +969,21 @@ impl App {
                 self.intensity,
             ),
         }
+        // The show's exports gate the picture: master fade, the mono
+        // wash of standby, and its one-shot white hits.
+        let sh = self.show_state;
+        if sh.fade < 0.999 || sh.mono > 0.001 || sh.flash > 0.001 {
+            for y in 0..stage.height {
+                for x in 0..stage.width {
+                    let cell = &mut frame.buffer_mut()[(stage.x + x, stage.y + y)];
+                    cell.fg = show_gate(cell.fg, &sh);
+                    cell.bg = show_gate(cell.bg, &sh);
+                }
+            }
+        }
+        // Only the hits this scene drew are live — that is what makes
+        // one scene read differently from the next.
+        let sc = self.scenes.scene();
         triggers::beat_hits(
             frame.buffer_mut(),
             stage,
@@ -858,6 +991,11 @@ impl App {
             vbeat,
             self.intensity,
             self.accent,
+            triggers::HitSet {
+                invert: sc.has_hit(scene::Hit::InvertFlash),
+                color: sc.has_hit(scene::Hit::ColorFlash),
+                strobe: sc.has_hit(scene::Hit::Strobe),
+            },
         );
         self.triggers.post(frame.buffer_mut(), stage, vbeat);
         self.render_lyrics(frame.buffer_mut(), stage, &ctx);
@@ -895,6 +1033,16 @@ impl App {
             };
             if self.cell_post > 0 {
                 s.push_str(&format!("{} ", CELL_POSTS[self.cell_post].0));
+            }
+            s.push_str(&format!("{} ", self.scenes.scene().hud()));
+            if !self.show.is_live() {
+                s.push_str(&format!("[{}] ", self.show.stage().name()));
+            }
+            if let Some(r) = self.scenes.pending() {
+                s.push_str(&format!("→{} ", r.length().name()));
+            }
+            if self.escapes > 0 {
+                s.push_str(&format!("esc{} ", self.escapes));
             }
             s
         };
@@ -1023,6 +1171,27 @@ impl App {
     }
 }
 
+/// Apply the show sequence's master exports to one colour: the mono
+/// wash, the white hit and the master fade, in that order. Kept as a
+/// free function because it is a Transform and reads nothing but the
+/// exports it is handed.
+fn show_gate(c: Color, sh: &show::ShowState) -> Color {
+    let Color::Rgb(r, g, b) = c else { return c };
+    let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
+    if sh.mono > 0.0 {
+        let l = pass::luma(r, g, b);
+        r += (l - r) * sh.mono;
+        g += (l - g) * sh.mono;
+        b += (l - b) * sh.mono;
+    }
+    if sh.flash > 0.0 {
+        r += (255.0 - r) * sh.flash;
+        g += (255.0 - g) * sh.flash;
+        b += (255.0 - b) * sh.flash;
+    }
+    pass::rgb(r * sh.fade, g * sh.fade, b * sh.fade)
+}
+
 /// Kills the caffeinate child when the app exits.
 #[cfg(target_os = "macos")]
 struct CaffeinateGuard(std::process::Child);
@@ -1099,6 +1268,7 @@ fn main() -> std::io::Result<()> {
         let frame_dt = now.duration_since(prev_frame).as_secs_f64();
         app.tick_jogs(frame_dt);
         app.tick_drive(frame_dt);
+        app.tick_show(frame_dt);
         prev_frame = now;
         app.sync();
 

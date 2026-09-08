@@ -11,11 +11,31 @@
 //! | **Source** | nothing (or a plate) | one frame | `pixfx`, `pixparticles`, the cell effects, `imgdust` |
 //! | **Transform** | one frame | that frame | `looks`, `scfx`, `postfx`, `pixpost`, the beat hits |
 //! | **Mixer** | **two** frames + a position | one frame | transitions |
-//! | **Modulator** | the clock | parameters, never pixels | camera, show sequences, `drive` |
+//! | **Modulator** | the clock | parameters, never pixels | `drive`, show sequences, camera |
+//! | **Orchestration** | nothing | *which units are active* | `scene` |
 //!
 //! Only Mixer takes two inputs, which is why transitions could not have
 //! been retrofitted onto a one-frame trait later. Modulators produce no
 //! pixels at all and must never be folded in with Transforms.
+//!
+//! Three things the ports taught us, after this table was first written:
+//!
+//! - **A Modulator is stateful by default.** The canonical signature is
+//!   `update(&mut self, dt, input) -> Exports`, as `drive` and `show`
+//!   both have: a state machine's position is not recoverable from a
+//!   clock reading. `camera::Modulator`'s pure `cam(&self, t)` is the
+//!   special case — a modulator whose constants were rolled once — not
+//!   the rule.
+//! - **A Mixer needed more channels than a mask.** Luma keys off the
+//!   incoming frame and Flash wants an additive bloom, neither of which
+//!   "which side wins at this cell" can express. Both arrived as
+//!   defaulted methods rather than a signature change, so the shape
+//!   stretched instead of breaking.
+//! - **Orchestration is a fifth shape, above the four rather than
+//!   inside them.** A scene reads no frame and writes no pixel, but it
+//!   is not a Modulator either: a modulator exports numbers every
+//!   frame, while a scene speaks only when it changes, and what it
+//!   hands over is a cast list rather than a parameter.
 //!
 //! This module defines the narrowest of those shapes — a per-cell colour
 //! transform — because three ports independently arrived at it:

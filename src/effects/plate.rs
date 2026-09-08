@@ -31,6 +31,9 @@ pub struct PlateFx {
     ken: crate::camera::KenBurns,
     /// Phrase dive, layered on top of the drift.
     punch: crate::camera::PunchIn,
+    /// Fit + focus drift. Stateful where the camera modulators are
+    /// pure, because easing toward a target needs the previous frame.
+    framing: crate::framing::Framing,
     /// Which mixer runs on the next plate swap.
     trans: usize,
 }
@@ -46,6 +49,7 @@ impl PlateFx {
             swap_beat: 0.0,
             ken: crate::camera::KenBurns::roll(0, 0.0),
             punch: crate::camera::PunchIn::new(1),
+            framing: crate::framing::Framing::new(0, crate::framing::Fit::Cover, false),
             trans: 0,
         }
     }
@@ -73,6 +77,19 @@ impl Effect for PlateFx {
             }
             _ => false,
         }
+    }
+
+    fn on_transition(&mut self, index: usize) {
+        self.trans = index % crate::transition::TRANSITIONS.len();
+    }
+
+    fn on_scene(&mut self, fit: crate::framing::Fit, seed: u64) {
+        let portrait = self
+            .plates
+            .get(self.current)
+            .map(|p| p.img.height() > p.img.width())
+            .unwrap_or(false);
+        self.framing = crate::framing::Framing::new(seed, fit, portrait);
     }
 
     fn status(&self) -> Option<String> {
@@ -148,11 +165,15 @@ impl Effect for PlateFx {
                 fy: base.fy + (dive.fy - base.fy) * k,
             }
         };
-        let cover = (tw / sw).max(th / sh);
+        // Framing resolves the fit; the camera only says where to look
+        // and how hard to push. Contain is the case that needs the
+        // framing's own scale — cover alone cannot express a letterbox.
+        self.framing.update(1.0 / 60.0, &ctx.drive, sh > sw);
+        let place = self.framing.place((sw, sh), (tw, th), cam);
         let punch = 1.0 + 0.10 * ctx.drive.gbeat() * (0.3 + 0.7 * ctx.intensity);
-        let zoom = cover * punch * cam.zoom;
-        let drift_x = (cam.fx - 0.5) * sw;
-        let drift_y = (cam.fy - 0.5) * sh;
+        let zoom = place.scale * punch;
+        let drift_x = place.drift_x;
+        let drift_y = place.drift_y;
 
         // Chroma split rides the beat decay.
         let chroma = 2.5 * (1.0 - ctx.phase).powi(2) * ctx.intensity;

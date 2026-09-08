@@ -48,6 +48,17 @@ fn scale(c: Color, k: f64) -> Color {
 ///
 /// `invertflash` inverts on a strong beat, `colorflash` washes the accent
 /// in on the bar, `strobe` fires on the first fraction of each eighth.
+/// Which hits the current scene drew. Over there a scene picked 2-3
+/// from its style's pool, and that selection is most of why one scene
+/// does not look like the next.
+#[derive(Clone, Copy, Default)]
+pub struct HitSet {
+    pub invert: bool,
+    pub color: bool,
+    pub strobe: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn beat_hits(
     buf: &mut Buffer,
     area: Rect,
@@ -55,12 +66,17 @@ pub fn beat_hits(
     beat: f64,
     intensity: f64,
     accent: (u8, u8, u8),
+    set: HitSet,
 ) {
-    let invert = d.gbeat() > 0.72;
-    let flash = 0.35 * d.gbar() * intensity;
+    let invert = set.invert && d.gbeat() > 0.72;
+    let flash = if set.color {
+        0.35 * d.gbar() * intensity
+    } else {
+        0.0
+    };
     // First 14% of each eighth, as over there.
     let eighth = (beat * 2.0).rem_euclid(1.0);
-    let strobe = if eighth < 0.14 {
+    let strobe = if set.strobe && eighth < 0.14 {
         (0.10 + 0.22 * intensity) * intensity
     } else {
         0.0
