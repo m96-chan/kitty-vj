@@ -6,7 +6,6 @@ mod font;
 mod link;
 mod midi;
 mod rng;
-mod xfade;
 
 use std::time::{Duration, Instant};
 
@@ -26,8 +25,18 @@ use effects::{
 enum LearnTarget {
     Off,
     Intensity,
-    Xfade,
+    /// One of the four channel faders.
+    Ch(usize),
 }
+
+/// A mixer channel: an effect slot and a vertical fader.
+struct Channel {
+    slot: usize,
+    level: f64,
+    cc: Option<(u8, u8)>,
+}
+
+const CHANNELS: usize = 4;
 
 /// Fixed timestep for clock advancement. Real elapsed time is consumed in
 /// whole ticks so a run is a pure function of (seed, tick count).
@@ -47,17 +56,14 @@ struct App {
     midi_clock: midi::MidiClock,
     midi_clock_sync: bool,
     cc_bind_int: Option<(u8, u8)>,
-    cc_bind_xf: Option<(u8, u8)>,
     learn: LearnTarget,
     last_cc: Option<(u8, u8, u8)>,
     link: Option<link::LinkSync>,
     link_sync: bool,
-    /// A/B decks: indices into `effects`. The crossfader mixes them.
-    slot_a: usize,
-    slot_b: usize,
-    /// Crossfader position: 0 = full A, 1 = full B.
-    xfade_pos: f64,
-    xstyle: xfade::XfadeStyle,
+    /// Four mixer channels, composited bottom (1) to top (4).
+    channels: [Channel; CHANNELS],
+    /// Channel the keyboard is aimed at.
+    focus: usize,
     scratch: Option<ratatui::buffer::Buffer>,
     intensity: f64,
     render_ms: f64, // EWMA of draw time
@@ -91,15 +97,16 @@ impl App {
             midi_clock: midi::MidiClock::new(),
             midi_clock_sync: false,
             cc_bind_int: None,
-            cc_bind_xf: None,
             learn: LearnTarget::Off,
             last_cc: None,
             link: None,
             link_sync: false,
-            slot_a: 0,
-            slot_b: 1,
-            xfade_pos: 0.0,
-            xstyle: xfade::XfadeStyle::Dissolve,
+            channels: std::array::from_fn(|i| Channel {
+                slot: i,
+                level: if i == 0 { 1.0 } else { 0.0 },
+                cc: None,
+            }),
+            focus: 0,
             scratch: None,
             intensity: 0.5,
             render_ms: 0.0,
@@ -120,13 +127,15 @@ impl App {
             KeyCode::Char('-') => self.clock.nudge_tempo(-0.5),
             KeyCode::Up => self.intensity = (self.intensity + 0.05).min(1.0),
             KeyCode::Down => self.intensity = (self.intensity - 0.05).max(0.0),
-            KeyCode::Left => self.xfade_pos = (self.xfade_pos - 0.05).max(0.0),
-            KeyCode::Right => self.xfade_pos = (self.xfade_pos + 0.05).min(1.0),
-            KeyCode::Char('t') => self.xstyle = self.xstyle.next(),
-            KeyCode::Tab => {
-                let next = (self.visible_slot() + 1) % self.effects.len();
-                self.load_hidden(next);
+            KeyCode::Left => {
+                let ch = &mut self.channels[self.focus];
+                ch.level = (ch.level - 0.05).max(0.0);
             }
+            KeyCode::Right => {
+                let ch = &mut self.channels[self.focus];
+                ch.level = (ch.level + 0.05).min(1.0);
+            }
+            KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('a') => {
                 if self.audio.is_none() {
@@ -148,11 +157,12 @@ impl App {
             }
             KeyCode::Char('m') => {
                 if self.midi.is_some() {
-                    // Cycle the learn target: off → intensity → xfade.
+                    // Cycle the learn target: off → int → ch1..ch4 → off.
                     self.learn = match self.learn {
                         LearnTarget::Off => LearnTarget::Intensity,
-                        LearnTarget::Intensity => LearnTarget::Xfade,
-                        LearnTarget::Xfade => LearnTarget::Off,
+                        LearnTarget::Intensity => LearnTarget::Ch(0),
+                        LearnTarget::Ch(i) if i + 1 < CHANNELS => LearnTarget::Ch(i + 1),
+                        LearnTarget::Ch(_) => LearnTarget::Off,
                     };
                 }
             }
@@ -178,41 +188,14 @@ impl App {
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.effects.len() {
-                    self.load_hidden(i);
+                    self.channels[self.focus].slot = i;
                 }
             }
             _ => {
-                // Unclaimed keys go to the hidden deck — the operator is
-                // prepping the thing they're about to fade in.
-                let target = self.hidden_slot();
+                // Unclaimed keys go to the focused channel's effect.
+                let target = self.channels[self.focus].slot;
                 self.effects[target].on_key(code);
             }
-        }
-    }
-
-    /// The deck contributing more of the picture.
-    fn visible_slot(&self) -> usize {
-        if self.xfade_pos < 0.5 {
-            self.slot_a
-        } else {
-            self.slot_b
-        }
-    }
-
-    /// The deck the audience mostly can't see — where new effects load.
-    fn hidden_slot(&self) -> usize {
-        if self.xfade_pos < 0.5 {
-            self.slot_b
-        } else {
-            self.slot_a
-        }
-    }
-
-    fn load_hidden(&mut self, i: usize) {
-        if self.xfade_pos < 0.5 {
-            self.slot_b = i;
-        } else {
-            self.slot_a = i;
         }
     }
 
@@ -228,8 +211,8 @@ impl App {
                             self.cc_bind_int = Some((ch, cc));
                             self.learn = LearnTarget::Off;
                         }
-                        LearnTarget::Xfade => {
-                            self.cc_bind_xf = Some((ch, cc));
+                        LearnTarget::Ch(i) => {
+                            self.channels[i].cc = Some((ch, cc));
                             self.learn = LearnTarget::Off;
                         }
                         LearnTarget::Off => {}
@@ -237,8 +220,10 @@ impl App {
                     if self.cc_bind_int == Some((ch, cc)) {
                         self.intensity = val as f64 / 127.0;
                     }
-                    if self.cc_bind_xf == Some((ch, cc)) {
-                        self.xfade_pos = val as f64 / 127.0;
+                    for c in &mut self.channels {
+                        if c.cc == Some((ch, cc)) {
+                            c.level = val as f64 / 127.0;
+                        }
                     }
                 }
                 midi::MidiEvent::Clock(at) => self.midi_clock.tick(at),
@@ -300,15 +285,15 @@ impl App {
             intensity: self.intensity,
         };
 
-        // A/B composite. Endpoints skip the second render entirely.
-        let t = self.xfade_pos;
-        if t <= 0.005 || self.slot_a == self.slot_b {
-            self.effects[self.slot_a].render(frame.buffer_mut(), stage, &ctx);
-        } else if t >= 0.995 {
-            self.effects[self.slot_b].render(frame.buffer_mut(), stage, &ctx);
-        } else {
-            self.effects[self.slot_a].render(frame.buffer_mut(), stage, &ctx);
-            // Deck B renders offscreen; the mask copies its cells over.
+        // Layer the four channels bottom to top. A channel fader is a
+        // per-cell dissolve mask (seed-hashed and monotonic, so raising
+        // it accumulates cells instead of boiling them); cells an effect
+        // left blank stay transparent, so lower layers show through.
+        for i in 0..CHANNELS {
+            let (slot, level) = (self.channels[i].slot, self.channels[i].level);
+            if level <= 0.004 {
+                continue;
+            }
             let scratch = match &mut self.scratch {
                 Some(b) if b.area == stage => {
                     b.reset();
@@ -319,13 +304,22 @@ impl App {
                     self.scratch.as_mut().unwrap()
                 }
             };
-            self.effects[self.slot_b].render(scratch, stage, &ctx);
+            self.effects[slot].render(scratch, stage, &ctx);
+            let full = level >= 0.995;
             for y in 0..stage.height {
                 for x in 0..stage.width {
-                    if self.xstyle.shows_b(x, y, stage.width, stage.height, t) {
-                        let (ax, ay) = (stage.x + x, stage.y + y);
-                        frame.buffer_mut()[(ax, ay)] = scratch[(ax, ay)].clone();
+                    if !full
+                        && rng::unit_f64(rng::hash3(x as u64, y as u64, 100 + i as u64)) >= level
+                    {
+                        continue;
                     }
+                    let (ax, ay) = (stage.x + x, stage.y + y);
+                    let cell = &scratch[(ax, ay)];
+                    // Untouched cells are transparent.
+                    if cell.symbol() == " " && cell.bg == Color::Reset {
+                        continue;
+                    }
+                    frame.buffer_mut()[(ax, ay)] = cell.clone();
                 }
             }
         }
@@ -333,17 +327,25 @@ impl App {
 
         let bar = (beat / 4.0).floor() as i64 + 1;
         let beat_in_bar = ctx.bar_phase as i64 + 1;
-        let status = self.effects[self.visible_slot()]
+        let status = self.effects[self.channels[self.focus].slot]
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
-        let decks = format!(
-            "A:{} {:>3.0}% B:{} {}",
-            self.effects[self.slot_a].name(),
-            self.xfade_pos * 100.0,
-            self.effects[self.slot_b].name(),
-            self.xstyle.name(),
-        );
+        let decks: String = self
+            .channels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mark = if i == self.focus { '*' } else { ' ' };
+                format!(
+                    "{mark}{}:{}·{:.0}",
+                    i + 1,
+                    self.effects[c.slot].name(),
+                    c.level * 100.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let aud = if let Some(e) = &self.audio_err {
             format!(" │ AUD! {e}")
         } else if let Some(a) = &self.audio {
@@ -377,13 +379,15 @@ impl App {
             if let Some((ch, cc)) = self.cc_bind_int {
                 bind.push_str(&format!(" int←cc{ch}.{cc}"));
             }
-            if let Some((ch, cc)) = self.cc_bind_xf {
-                bind.push_str(&format!(" xf←cc{ch}.{cc}"));
+            for (i, c) in self.channels.iter().enumerate() {
+                if let Some((ch, cc)) = c.cc {
+                    bind.push_str(&format!(" c{}←cc{ch}.{cc}", i + 1));
+                }
             }
             let learn = match self.learn {
-                LearnTarget::Off => "",
-                LearnTarget::Intensity => " LEARN→int",
-                LearnTarget::Xfade => " LEARN→xf",
+                LearnTarget::Off => String::new(),
+                LearnTarget::Intensity => " LEARN→int".to_string(),
+                LearnTarget::Ch(i) => format!(" LEARN→ch{}", i + 1),
             };
             let mclk = match (self.midi_clock_sync, self.midi_clock.bpm()) {
                 (true, Some(b)) => format!(" ♻{b:.1}"),
@@ -395,7 +399,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ ←→ 1-{} t o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} o a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
