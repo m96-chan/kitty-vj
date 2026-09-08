@@ -519,14 +519,14 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} x b o a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
             decks,
             status,
             self.triggers.hud(),
-            format!(" │ SC:{}", self.scfx_type.name()),
+            self.scfx_type.name(),
             aud,
             lnk,
             mid,
