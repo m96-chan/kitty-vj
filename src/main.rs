@@ -150,6 +150,12 @@ struct App {
     /// Scene director — orchestration: it decides which units are
     /// active, and speaks only when the scene changes.
     scenes: scene::SceneDirector,
+    /// Scene flags: A/B cut on eighths, and the phrase-top stutter.
+    abcut: bool,
+    stutter: bool,
+    /// Held frame for the stutter, and the subdivision it was taken on.
+    stutter_hold: Option<ratatui::buffer::Buffer>,
+    stutter_tick: i64,
     /// Scene changes that had to fire off-grid. A set full of these
     /// means the clock is wrong, so it is worth seeing.
     escapes: u32,
@@ -240,6 +246,10 @@ impl App {
             audio_err: None,
             bpm_window: (85, 170),
             scenes: scene::SceneDirector::new(scene::Style::Neon, 1),
+            abcut: false,
+            stutter: false,
+            stutter_hold: None,
+            stutter_tick: i64::MIN,
             escapes: 0,
             show: show::Show::new(),
             show_state: show::ShowState::neutral(),
@@ -569,6 +579,8 @@ impl App {
         self.look = sc.look();
         self.hue_base = sc.hue_base;
         self.accent = sc.accent;
+        self.abcut = sc.abcut;
+        self.stutter = sc.stutter;
         // Posts: the scene names one of each kind, or none.
         self.cell_post = 0;
         self.pix_post = 0;
@@ -900,7 +912,15 @@ impl App {
                     continue;
                 }
                 let bg = (1.0 - wsum).max(0.0);
-                let r = rng::unit_f64(rng::hash3(x as u64, y as u64, 77)) * (wsum + bg);
+                // ABCUT — on eighths the mix re-rolls against a different
+                // salt, so the picture hard-cuts between the same set of
+                // channels instead of holding one allocation.
+                let salt = if self.abcut && self.drive.groove > 0.5 {
+                    77 + (vbeat * 2.0).floor().rem_euclid(2.0) as u64
+                } else {
+                    77
+                };
+                let r = rng::unit_f64(rng::hash3(x as u64, y as u64, salt)) * (wsum + bg);
                 let mut acc = 0.0;
                 for &(i, l) in &parts[..n] {
                     acc += l;
@@ -969,6 +989,40 @@ impl App {
                 self.intensity,
             ),
         }
+        // STUTTER — in the first two beats of a phrase the pipeline is
+        // re-run at only two subdivisions per beat and the held frame is
+        // re-blitted otherwise. Not running the pipeline is the point:
+        // the frame rate goes up while it holds.
+        if self.stutter && self.drive.groove > 0.5 {
+            let in_window = vbeat.rem_euclid(16.0) < 2.0;
+            let tick = (vbeat * 2.0).floor() as i64;
+            if in_window {
+                if tick == self.stutter_tick
+                    && let Some(h) = &self.stutter_hold
+                    && h.area == stage
+                {
+                    for y in 0..stage.height {
+                        for x in 0..stage.width {
+                            let (ax, ay) = (stage.x + x, stage.y + y);
+                            frame.buffer_mut()[(ax, ay)] = h[(ax, ay)].clone();
+                        }
+                    }
+                } else {
+                    self.stutter_tick = tick;
+                    let mut h = ratatui::buffer::Buffer::empty(stage);
+                    for y in 0..stage.height {
+                        for x in 0..stage.width {
+                            let (ax, ay) = (stage.x + x, stage.y + y);
+                            h[(ax, ay)] = frame.buffer_mut()[(ax, ay)].clone();
+                        }
+                    }
+                    self.stutter_hold = Some(h);
+                }
+            } else {
+                self.stutter_hold = None;
+            }
+        }
+
         // The show's exports gate the picture: master fade, the mono
         // wash of standby, and its one-shot white hits.
         let sh = self.show_state;
@@ -1040,6 +1094,12 @@ impl App {
             }
             if let Some(r) = self.scenes.pending() {
                 s.push_str(&format!("→{} ", r.length().name()));
+            }
+            if self.abcut {
+                s.push_str("AB ");
+            }
+            if self.stutter {
+                s.push_str("STU ");
             }
             if self.escapes > 0 {
                 s.push_str(&format!("esc{} ", self.escapes));
