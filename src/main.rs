@@ -65,7 +65,7 @@ struct App {
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
     focus: usize,
-    scratch: Option<ratatui::buffer::Buffer>,
+    scratch: Vec<ratatui::buffer::Buffer>,
     intensity: f64,
     render_ms: f64, // EWMA of draw time
     quit: bool,
@@ -109,7 +109,7 @@ impl App {
                 cc: bindings.channels[i],
             }),
             focus: 0,
-            scratch: None,
+            scratch: Vec::new(),
             intensity: 0.5,
             render_ms: 0.0,
             quit: false,
@@ -298,42 +298,57 @@ impl App {
             intensity: self.intensity,
         };
 
-        // Layer the four channels bottom to top. A channel fader is a
-        // per-cell dissolve mask (seed-hashed and monotonic, so raising
-        // it accumulates cells instead of boiling them); cells an effect
-        // left blank stay transparent, so lower layers show through.
-        for i in 0..CHANNELS {
-            let (slot, level) = (self.channels[i].slot, self.channels[i].level);
-            if level <= 0.004 {
-                continue;
-            }
-            let scratch = match &mut self.scratch {
-                Some(b) if b.area == stage => {
-                    b.reset();
-                    b
-                }
-                _ => {
-                    self.scratch = Some(ratatui::buffer::Buffer::empty(stage));
-                    self.scratch.as_mut().unwrap()
-                }
-            };
-            self.effects[slot].render(scratch, stage, &ctx);
-            let full = level >= 0.995;
-            for y in 0..stage.height {
-                for x in 0..stage.width {
-                    if !full
-                        && rng::unit_f64(rng::hash3(x as u64, y as u64, 100 + i as u64)) >= level
-                    {
-                        continue;
-                    }
-                    let (ax, ay) = (stage.x + x, stage.y + y);
-                    let cell = &scratch[(ax, ay)];
-                    // Untouched cells are transparent.
+        // Mix the channels like a mixer sums audio: per cell, every
+        // channel that drew something enters a lottery weighted by its
+        // fader, with the leftover weight going to background. Four
+        // faders at full = a quarter of the cells each; one fader alone
+        // at 30% = 30% of its cells. The per-cell hash is fixed, so the
+        // allocation is stable frame to frame instead of boiling.
+        let active: Vec<usize> = (0..CHANNELS)
+            .filter(|&i| self.channels[i].level > 0.004)
+            .collect();
+        if self.scratch.len() != CHANNELS || self.scratch[0].area != stage {
+            self.scratch = (0..CHANNELS)
+                .map(|_| ratatui::buffer::Buffer::empty(stage))
+                .collect();
+        }
+        for &i in &active {
+            self.scratch[i].reset();
+            let slot = self.channels[i].slot;
+            self.effects[slot].render(&mut self.scratch[i], stage, &ctx);
+        }
+        for y in 0..stage.height {
+            for x in 0..stage.width {
+                let (ax, ay) = (stage.x + x, stage.y + y);
+                // Contenders: active channels whose effect touched this
+                // cell, top channel first.
+                let mut wsum = 0.0;
+                let mut parts: [(usize, f64); CHANNELS] = [(0, 0.0); CHANNELS];
+                let mut n = 0;
+                for &i in active.iter().rev() {
+                    let cell = &self.scratch[i][(ax, ay)];
                     if cell.symbol() == " " && cell.bg == Color::Reset {
-                        continue;
+                        continue; // untouched = transparent
                     }
-                    frame.buffer_mut()[(ax, ay)] = cell.clone();
+                    let l = self.channels[i].level;
+                    parts[n] = (i, l);
+                    n += 1;
+                    wsum += l;
                 }
+                if n == 0 {
+                    continue;
+                }
+                let bg = (1.0 - wsum).max(0.0);
+                let r = rng::unit_f64(rng::hash3(x as u64, y as u64, 77)) * (wsum + bg);
+                let mut acc = 0.0;
+                for &(i, l) in &parts[..n] {
+                    acc += l;
+                    if r < acc {
+                        frame.buffer_mut()[(ax, ay)] = self.scratch[i][(ax, ay)].clone();
+                        break;
+                    }
+                }
+                // r beyond every contender lands in the background share.
             }
         }
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
