@@ -25,6 +25,9 @@ pub struct Bindings {
     pub pads: [Vec<(u8, u8)>; crate::triggers::PADS],
     /// SOUND COLOR FX knobs per channel (CC).
     pub colors: [Option<(u8, u8)>; 4],
+    /// Jog wheels: relative CC per deck, and optional platter touch notes.
+    pub jogs: [Option<(u8, u8)>; 4],
+    pub jog_touch: [Option<(u8, u8)>; 4],
     /// SCFX type select buttons (notes), hardware order left to right.
     pub scfx: [Option<(u8, u8)>; 6],
     /// Remembered SCFX state: Some(index into scfx::TYPES) or None = off.
@@ -70,6 +73,14 @@ pub fn parse(text: &str) -> Bindings {
             "color2" => b.colors[1] = cc,
             "color3" => b.colors[2] = cc,
             "color4" => b.colors[3] = cc,
+            "jog1" => b.jogs[0] = cc,
+            "jog2" => b.jogs[1] = cc,
+            "jog3" => b.jogs[2] = cc,
+            "jog4" => b.jogs[3] = cc,
+            "jog_touch1" => b.jog_touch[0] = cc,
+            "jog_touch2" => b.jog_touch[1] = cc,
+            "jog_touch3" => b.jog_touch[2] = cc,
+            "jog_touch4" => b.jog_touch[3] = cc,
             k if SCFX_KEYS.contains(&k) => {
                 let i = SCFX_KEYS.iter().position(|s| *s == k).unwrap();
                 b.scfx[i] = cc;
@@ -111,6 +122,16 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
     for (i, c) in b.colors.iter().enumerate() {
         if let Some(cc) = c {
             out.push_str(&format!("color{} = {}\n", i + 1, fmt_cc(*cc)));
+        }
+    }
+    for (i, j) in b.jogs.iter().enumerate() {
+        if let Some(cc) = j {
+            out.push_str(&format!("jog{} = {}  # relative cc\n", i + 1, fmt_cc(*cc)));
+        }
+    }
+    for (i, j) in b.jog_touch.iter().enumerate() {
+        if let Some(cc) = j {
+            out.push_str(&format!("jog_touch{} = {}  # note\n", i + 1, fmt_cc(*cc)));
         }
     }
     for (i, s) in b.scfx.iter().enumerate() {

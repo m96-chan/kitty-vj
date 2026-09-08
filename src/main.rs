@@ -5,6 +5,7 @@ mod config;
 mod effects;
 mod font;
 mod graphics;
+mod jog;
 mod link;
 mod midi;
 mod pixfx;
@@ -70,6 +71,10 @@ struct App {
     audio_err: Option<String>,
     /// Fold window for audio detection; cycled with 'r'.
     bpm_window: (u32, u32),
+    /// Jog wheels, one per deck, scrubbing beat time.
+    jogs: [jog::Jog; 4],
+    jog_bind: [Option<(u8, u8)>; 4],
+    jog_touch_bind: [Option<(u8, u8)>; 4],
     midi: Option<midi::MidiIn>,
     midi_clock: midi::MidiClock,
     midi_clock_sync: bool,
@@ -129,6 +134,9 @@ impl App {
             audio_sync: false,
             audio_err: None,
             bpm_window: (85, 170),
+            jogs: Default::default(),
+            jog_bind: bindings.jogs,
+            jog_touch_bind: bindings.jog_touch,
             // MIDI needs no permission prompt — open at launch.
             midi: midi::MidiIn::open().ok(),
             midi_clock: midi::MidiClock::new(),
@@ -301,6 +309,18 @@ impl App {
         }
     }
 
+    /// Combined scrub from every jog, in beats.
+    fn jog_offset(&self) -> f64 {
+        self.jogs.iter().map(|j| j.offset()).sum()
+    }
+
+    /// Coast/recentre the wheels by real elapsed time.
+    fn tick_jogs(&mut self, dt: f64) {
+        for j in &mut self.jogs {
+            j.tick(dt);
+        }
+    }
+
     /// Persist current CC bindings to the gig config next to the app.
     fn save_bindings(&self) {
         let b = config::Bindings {
@@ -308,6 +328,8 @@ impl App {
             channels: std::array::from_fn(|i| self.channels[i].cc),
             pads: self.pad_bind.clone(),
             colors: std::array::from_fn(|i| self.channels[i].color_cc),
+            jogs: self.jog_bind,
+            jog_touch: self.jog_touch_bind,
             scfx: self.scfx_bind,
             scfx_selected: self
                 .scfx_on
@@ -340,6 +362,11 @@ impl App {
                     if self.cc_bind_int == Some((ch, cc)) {
                         self.intensity = val as f64 / 127.0;
                     }
+                    for (j, bind) in self.jog_bind.iter().enumerate() {
+                        if *bind == Some((ch, cc)) {
+                            self.jogs[j].cc(val);
+                        }
+                    }
                     for c in &mut self.channels {
                         if c.cc == Some((ch, cc)) {
                             c.level = val as f64 / 127.0;
@@ -367,6 +394,11 @@ impl App {
                         }
                         continue;
                     }
+                    for (j, bind) in self.jog_touch_bind.iter().enumerate() {
+                        if *bind == Some((ch, note)) {
+                            self.jogs[j].touch(true);
+                        }
+                    }
                     if let Some(i) = self.scfx_bind.iter().position(|b| *b == Some((ch, note))) {
                         // Hardware semantics: pressing the lit button
                         // turns the section off; the app mirrors that
@@ -384,6 +416,11 @@ impl App {
                     }
                 }
                 midi::MidiEvent::NoteOff { ch, note } => {
+                    for (j, bind) in self.jog_touch_bind.iter().enumerate() {
+                        if *bind == Some((ch, note)) {
+                            self.jogs[j].touch(false);
+                        }
+                    }
                     if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.release(i);
                     }
@@ -468,8 +505,9 @@ impl App {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(hud_h)]).areas(frame.area());
 
         let beat = self.clock.beat();
-        // Backspin bends the beat the effects see; the clock keeps real time.
-        let vbeat = self.triggers.warp_beat(beat);
+        // Backspin bends the beat the effects see; the jogs scrub it
+        // continuously on top. The clock itself keeps real time.
+        let vbeat = self.triggers.warp_beat(beat) + self.jog_offset();
         let ctx = FrameCtx {
             beat: vbeat,
             phase: vbeat.rem_euclid(1.0),
@@ -564,6 +602,10 @@ impl App {
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
+        let mut trig_seg = self.triggers.hud();
+        if self.jogs.iter().any(|j| j.active()) {
+            trig_seg.push_str(&format!(" ↻{:+.2}", self.jog_offset()));
+        }
         let gfx_seg = if self.gfx {
             format!("▓{} ", PIX_FX[self.pix].0)
         } else {
@@ -659,7 +701,7 @@ impl App {
             beat_in_bar,
             decks,
             status,
-            self.triggers.hud(),
+            trig_seg,
             if self.scfx_on {
                 self.scfx_type.name()
             } else {
@@ -719,6 +761,7 @@ fn main() -> std::io::Result<()> {
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;
+    let mut prev_frame = Instant::now();
     let mut gfx_was_on = false;
 
     let result = loop {
@@ -745,6 +788,8 @@ fn main() -> std::io::Result<()> {
             acc -= TICK;
         }
         app.process_midi();
+        app.tick_jogs(now.duration_since(prev_frame).as_secs_f64());
+        prev_frame = now;
         app.sync();
 
         let t0 = Instant::now();
