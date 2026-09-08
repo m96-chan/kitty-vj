@@ -53,7 +53,7 @@ impl XfadeStyle {
                 let slat = (x as f64 / w as f64 * BLINDS) as u64;
                 let within = (x as f64 / w as f64 * BLINDS).fract();
                 // Alternate slats sweep in opposite directions.
-                let p = if slat % 2 == 0 { within } else { 1.0 - within };
+                let p = if slat.is_multiple_of(2) { within } else { 1.0 - within };
                 p < t
             }
         }
