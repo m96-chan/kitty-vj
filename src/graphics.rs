@@ -65,19 +65,22 @@ const CHUNK: usize = 4096; // base64 bytes per escape, per the spec
 /// the previous frame with the same image id. Wrapped in synchronized
 /// output so the swap is atomic. Full-screen at the cursor.
 pub fn transmit_direct(out: &mut impl Write, fb: &Framebuffer, id: u32) -> io::Result<()> {
-    transmit_placed(out, fb, id, 0, 0)
+    transmit_placed(out, fb, id, 0, 0, 0)
 }
 
 /// As `transmit_direct`, but scaled into a `cols`x`rows` cell box at the
-/// current cursor position (0 = the image's native cell size). This is
-/// how the pixel stage drops into the terminal's cell grid, leaving the
-/// HUD row for text.
+/// current cursor position (0 = the image's native cell size), at
+/// z-index `z`. A negative z puts the image **below the text layer**, so
+/// cells keeping their default background show it through — that's how
+/// the pixel tier composites under the ASCII/halfblock cell tier in one
+/// pass, no readback.
 pub fn transmit_placed(
     out: &mut impl Write,
     fb: &Framebuffer,
     id: u32,
     cols: u16,
     rows: u16,
+    z: i32,
 ) -> io::Result<()> {
     let b64 = base64(&fb.px);
     // Home the cursor so the image lands top-left, inside a synchronized
@@ -89,11 +92,13 @@ pub fn transmit_placed(
     // placement id replaces the placement in place. No per-frame delete
     // — deleting then re-adding leaves a visible gap (the image doesn't
     // stay put); replacing keeps it stable.
-    let placement = if cols > 0 && rows > 0 {
-        format!(",c={cols},r={rows}")
-    } else {
-        String::new()
-    };
+    let mut placement = String::new();
+    if cols > 0 && rows > 0 {
+        placement.push_str(&format!(",c={cols},r={rows}"));
+    }
+    if z != 0 {
+        placement.push_str(&format!(",z={z}"));
+    }
 
     let bytes = b64.as_bytes();
     let mut off = 0;

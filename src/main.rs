@@ -190,6 +190,7 @@ impl App {
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
             KeyCode::Char('g') => self.gfx = !self.gfx,
+            KeyCode::Char('p') => self.pix = (self.pix + 1) % PIX_FX.len(),
             KeyCode::Char('x') => {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
                 if !self.scfx_on {
@@ -265,11 +266,7 @@ impl App {
             }
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
-                if self.gfx {
-                    if i < PIX_FX.len() {
-                        self.pix = i;
-                    }
-                } else if i < self.effects.len() {
+                if i < self.effects.len() {
                     self.channels[self.focus].slot = i;
                 }
             }
@@ -440,7 +437,9 @@ impl App {
         self.gfx_fb.resize(pw, ph);
         let beat = self.triggers.warp_beat(self.clock.beat());
         PIX_FX[self.pix].1(&mut self.gfx_fb, beat, self.intensity);
-        graphics::transmit_placed(out, &self.gfx_fb, 1, cols, rows)
+        // z=-1: below the cell layer, so default-background cells show it
+        // through and the two tiers composite in one pass.
+        graphics::transmit_placed(out, &self.gfx_fb, 1, cols, rows, -1)
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -461,12 +460,12 @@ impl App {
             intensity: self.intensity,
         };
 
-        // Graphics tier: the stage cells stay blank (ratatui paints the
-        // default background), and the pixel image is placed over exactly
-        // that cell rect after this draw — see the main loop. The HUD row
-        // below the image survives as text. Skip cell compositing.
+        // Graphics tier composites UNDER the cells: the pixel image goes
+        // to z=-1 after this draw (see the main loop), and cells left at
+        // the default background show it through. So the cell mixer always
+        // runs — sparse effects (rain, sparks, pulse glyphs) let the pixel
+        // tier through, opaque ones (plate halfblock) cover it.
         self.stage_cells = (stage.width, stage.height);
-        let skip_cells = self.gfx;
 
         // Mix the channels like a mixer sums audio: per cell, every
         // channel that drew something enters a lottery weighted by its
@@ -474,13 +473,9 @@ impl App {
         // faders at full = a quarter of the cells each; one fader alone
         // at 30% = 30% of its cells. The per-cell hash is fixed, so the
         // allocation is stable frame to frame instead of boiling.
-        let active: Vec<usize> = if skip_cells {
-            Vec::new()
-        } else {
-            (0..CHANNELS)
-                .filter(|&i| self.channels[i].level > 0.004)
-                .collect()
-        };
+        let active: Vec<usize> = (0..CHANNELS)
+            .filter(|&i| self.channels[i].level > 0.004)
+            .collect();
         if self.scratch.len() != CHANNELS || self.scratch[0].area != stage {
             self.scratch = (0..CHANNELS)
                 .map(|_| ratatui::buffer::Buffer::empty(stage))
@@ -552,9 +547,13 @@ impl App {
             .status()
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
-        let decks: String = if self.gfx {
-            format!("GFX {} {:.0}%", PIX_FX[self.pix].0, self.intensity * 100.0)
+        let gfx_seg = if self.gfx {
+            format!("▓{} ", PIX_FX[self.pix].0)
         } else {
+            String::new()
+        };
+        let decks: String = format!(
+            "{gfx_seg}{}",
             self.channels
                 .iter()
                 .enumerate()
@@ -574,7 +573,7 @@ impl App {
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
-        };
+        );
         let aud = if let Some(e) = &self.audio_err {
             format!(" │ AUD! {e}")
         } else if let Some(a) = &self.audio {
@@ -633,7 +632,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g x b o h a m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p x b o h a m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
