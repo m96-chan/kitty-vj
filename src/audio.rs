@@ -173,7 +173,7 @@ impl Analyzer {
         }
         self.hops += 1;
         // Re-estimate twice a second once the window has substance.
-        if self.hops % 30 == 0 && self.env.len() >= 300 {
+        if self.hops.is_multiple_of(30) && self.env.len() >= 300 {
             self.analyze();
         }
     }
