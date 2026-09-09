@@ -188,12 +188,36 @@ pub fn draw_cells(
 /// post passes downstream then apply to it exactly as they do to a
 /// generated field.
 pub fn draw_pixels(fb: &mut Framebuffer, img: &RgbImage, gbeat: f64, intensity: f64, mirror: bool) {
-    let Some(fit) = Fit::cover(
-        (img.width() as f64, img.height() as f64),
-        (fb.w as f64, fb.h as f64),
-        punch(gbeat, intensity),
+    draw_pixels_cam(
+        fb,
+        img,
+        gbeat,
+        intensity,
         mirror,
-    ) else {
+        crate::camera::Cam::default(),
+    )
+}
+
+/// As `draw_pixels`, seen through a camera — the pixel tier's plate gets
+/// the same Ken Burns language the cell tier speaks, through the same
+/// sampler, so the two cannot pulse or frame differently.
+pub fn draw_pixels_cam(
+    fb: &mut Framebuffer,
+    img: &RgbImage,
+    gbeat: f64,
+    intensity: f64,
+    mirror: bool,
+    cam: crate::camera::Cam,
+) {
+    let (sw, sh) = (img.width() as f64, img.height() as f64);
+    let (tw, th) = (fb.w as f64, fb.h as f64);
+    if sw < 1.0 || sh < 1.0 || tw < 1.0 || th < 1.0 {
+        return;
+    }
+    let cover = (tw / sw).max(th / sh);
+    let scale = cover * punch(gbeat, intensity) * cam.zoom.max(0.01);
+    let drift = ((cam.fx - 0.5) * sw, (cam.fy - 0.5) * sh);
+    let Some(fit) = Fit::placed((sw, sh), (tw, th), scale, drift, mirror) else {
         return;
     };
     for y in 0..fb.h {

@@ -29,6 +29,9 @@ pub struct Triggers {
     trail: Option<Buffer>, // reverb: decaying smear
     echo: Option<Buffer>,  // echo: last beat-line snapshot
     echo_beat: f64,
+    /// Roll's frozen frame on the pixel side. The cell hold alone left
+    /// the pixel layer animating under a "frozen" picture.
+    hold_fb: Option<crate::graphics::Framebuffer>,
 }
 
 fn scale(c: Color, k: f64) -> Color {
@@ -114,6 +117,12 @@ impl ColorPass for HitSet {
     }
 }
 
+fn clone_fb(fb: &crate::graphics::Framebuffer) -> crate::graphics::Framebuffer {
+    let mut h = crate::graphics::Framebuffer::new(fb.w, fb.h);
+    h.px.copy_from_slice(&fb.px);
+    h
+}
+
 fn blank(buf: &Buffer, x: u16, y: u16) -> bool {
     let c = &buf[(x, y)];
     c.symbol() == " " && c.bg == Color::Reset
@@ -128,6 +137,7 @@ impl Triggers {
             trail: None,
             echo: None,
             echo_beat: 0.0,
+            hold_fb: None,
         }
     }
 
@@ -145,7 +155,10 @@ impl Triggers {
         if i < PADS {
             self.active[i] = false;
             match i {
-                ROLL => self.hold = None,
+                ROLL => {
+                    self.hold = None;
+                    self.hold_fb = None;
+                }
                 REVERB => self.trail = None,
                 ECHO => self.echo = None,
                 _ => {}
@@ -162,6 +175,91 @@ impl Triggers {
             self.press_beat[BACKSPIN] - held * held * 2.0
         } else {
             real
+        }
+    }
+
+    /// The pad passes that must also land on the pixel framebuffer, or
+    /// the two tiers tell different stories: a blackout that clears only
+    /// cells *reveals* the pixel layer, and a frozen frame with plasma
+    /// still boiling underneath is not frozen. Reverb and echo stay
+    /// cell-only — their trails live in cell buffers, and the pixel tier
+    /// has its own Feedback post for that role.
+    pub fn post_fb(&mut self, fb: &mut crate::graphics::Framebuffer, beat: f64) {
+        let tick16 = crate::pass::tick16(beat);
+
+        // ROLL — freeze, matching the cell hold.
+        if self.active[ROLL] {
+            match &self.hold_fb {
+                None => self.hold_fb = Some(clone_fb(fb)),
+                Some(h) if h.w == fb.w && h.h == fb.h => {
+                    fb.px.copy_from_slice(&h.px);
+                    if !tick16.is_multiple_of(2) {
+                        for p in fb.px.iter_mut() {
+                            *p = (*p as f64 * 0.8) as u8;
+                        }
+                    }
+                }
+                Some(_) => self.hold_fb = Some(clone_fb(fb)),
+            }
+        }
+
+        // VBREAK — the same sag, on pixel rows.
+        if self.active[VBREAK] && fb.h > 0 {
+            let held = (beat - self.press_beat[VBREAK]).max(0.0);
+            let src = fb.px.clone();
+            let w = fb.w as usize;
+            for y in (0..fb.h as usize).rev() {
+                let sag = (held * held * 0.6 * (y as f64 + 1.0) / fb.h as f64 * 2.0) as usize;
+                let sy = y.saturating_sub(sag);
+                fb.px.copy_within(sy * w * 3..(sy + 1) * w * 3, y * w * 3);
+                let _ = &src;
+            }
+            let k = (1.0 - held * 0.12).max(0.2);
+            for p in fb.px.iter_mut() {
+                *p = (*p as f64 * k) as u8;
+            }
+        }
+
+        // FLANGER — row displacement, wrapped, like the cell rows.
+        if self.active[FLANGER] && fb.w > 0 {
+            let src = fb.px.clone();
+            let w = fb.w as usize;
+            for y in 0..fb.h as usize {
+                let off = ((y as f64 * 0.11 + beat * std::f64::consts::TAU).sin() * 12.0) as i64;
+                for x in 0..w {
+                    let sx = (x as i64 - off).rem_euclid(w as i64) as usize;
+                    let (d, s0) = (3 * (y * w + x), 3 * (y * w + sx));
+                    fb.px[d] = src[s0];
+                    fb.px[d + 1] = src[s0 + 1];
+                    fb.px[d + 2] = src[s0 + 2];
+                }
+            }
+        }
+
+        // TRANS — the gate blacks the pixels too, or clearing the cells
+        // above would *reveal* this layer instead of cutting to black.
+        if self.active[TRANS] && !tick16.is_multiple_of(2) {
+            fb.px.fill(0);
+        }
+
+        // SWEEP — the same band, by pixel column.
+        if self.active[SWEEP] && fb.w > 0 {
+            let pos = (beat * 0.5).fract() * fb.w as f64;
+            let w = fb.w as usize;
+            for y in 0..fb.h as usize {
+                for x in 0..w {
+                    let d = (x as f64 - pos).abs();
+                    let k = if d < 4.0 * (fb.w as f64 / 200.0).max(1.0) {
+                        1.7
+                    } else {
+                        0.4
+                    };
+                    let i = 3 * (y * w + x);
+                    for c in 0..3 {
+                        fb.px[i + c] = ((fb.px[i + c] as f64) * k).min(255.0) as u8;
+                    }
+                }
+            }
         }
     }
 

@@ -228,8 +228,12 @@ struct App {
     scratch_fb: graphics::Framebuffer,
     gfx_fb: graphics::Framebuffer,
     /// Which pixel effect (index into PIX_FX) when in graphics mode.
-    /// Which plate the pixel tier shows when PLATE is its source.
+    /// Manual offset into the plate rotation for the pixel PLATE; the
+    /// base index advances by phrase in closed form, like the cell one.
     pix_plate: usize,
+    /// Ken Burns for the pixel plate, re-rolled when its plate changes.
+    pix_ken: camera::KenBurns,
+    pix_ken_idx: usize,
     /// Post pass over the pixel frame.
     pix_post: usize,
     /// Live capture, shared with the CAM effect. Opened on demand: a
@@ -342,6 +346,8 @@ impl App {
             scratch_fb: graphics::Framebuffer::new(1, 1),
             gfx_fb: graphics::Framebuffer::new(1, 1),
             pix_plate: 0,
+            pix_ken: camera::KenBurns::roll(0, 0.0),
+            pix_ken_idx: usize::MAX,
             pix_post: 0,
             capture: cap_shared,
             capture_err: None,
@@ -629,8 +635,28 @@ impl App {
                 }
             }
             units::Pix::Plate => {
-                if let Some(p) = self.plates.get(self.pix_plate % self.plates.len().max(1)) {
-                    source::draw_pixels(&mut self.gfx_fb, &p.img, self.drive.gbeat(), i, false);
+                // Rotation in closed form — one step per 8 bars, like
+                // the cell plate — plus the manual offset. The camera
+                // re-rolls when the plate changes, anchored to now.
+                let n = self.plates.len().max(1);
+                let idx = ((beat.max(0.0) / 32.0) as usize + self.pix_plate) % n;
+                if idx != self.pix_ken_idx {
+                    self.pix_ken = camera::KenBurns::roll(idx as u64, self.vt);
+                    self.pix_ken_idx = idx;
+                }
+                if let Some(p) = self.plates.get(idx) {
+                    let cam = {
+                        use camera::Modulator;
+                        self.pix_ken.cam(self.vt, &self.drive)
+                    };
+                    source::draw_pixels_cam(
+                        &mut self.gfx_fb,
+                        &p.img,
+                        self.drive.gbeat(),
+                        i,
+                        false,
+                        cam,
+                    );
                 }
             }
             units::Pix::Sparks => {
@@ -671,6 +697,69 @@ impl App {
                 acc,
                 acc_b,
             ),
+        }
+    }
+
+    /// Run the frame-wide colour passes over the pixel framebuffer, so
+    /// the two tiers agree: without this, an outro fade dims the cells
+    /// while the plasma underneath stays at full brightness, and no look
+    /// or hit ever touches a pixel channel.
+    fn apply_passes_over_fb(&mut self, vbeat: f64) {
+        let looks_active = self.looks.iter().any(|l| *l != looks::Look::Plain);
+        let sc = self.scenes.scene();
+        let hits = triggers::HitSet {
+            invert: sc.has_hit(scene::Hit::InvertFlash),
+            color: sc.has_hit(scene::Hit::ColorFlash),
+            strobe: sc.has_hit(scene::Hit::Strobe),
+        };
+        let sh = self.show_state;
+        let probe = pass::CellCtx {
+            drive: &self.drive,
+            t: self.vt,
+            beat: vbeat,
+            x: 0,
+            y: 0,
+            w: self.gfx_fb.w.min(u16::MAX as u32) as u16,
+            intensity: self.intensity,
+            hue_base: self.hue_base,
+            accent: self.accent,
+        };
+        let hits_on = ColorPass::amount(&hits, &probe) > 0.005;
+        let show_on = ColorPass::amount(&sh, &probe) > 0.005;
+        if !looks_active && !hits_on && !show_on {
+            return;
+        }
+        let w = self.gfx_fb.w as usize;
+        for y in 0..self.gfx_fb.h as usize {
+            for x in 0..w {
+                let i = 3 * (y * w + x);
+                let mut c = Color::Rgb(
+                    self.gfx_fb.px[i],
+                    self.gfx_fb.px[i + 1],
+                    self.gfx_fb.px[i + 2],
+                );
+                let cctx = pass::CellCtx {
+                    x: x.min(u16::MAX as usize) as u16,
+                    y: y.min(u16::MAX as usize) as u16,
+                    ..probe
+                };
+                if looks_active {
+                    for lk in &self.looks {
+                        c = lk.map(c, &cctx);
+                    }
+                }
+                if hits_on {
+                    c = hits.map(c, &cctx);
+                }
+                if show_on {
+                    c = sh.map(c, &cctx);
+                }
+                if let Color::Rgb(r, g, b) = c {
+                    self.gfx_fb.px[i] = r;
+                    self.gfx_fb.px[i + 1] = g;
+                    self.gfx_fb.px[i + 2] = b;
+                }
+            }
         }
     }
 
@@ -1096,9 +1185,50 @@ impl App {
                 self.scratch_fb.px.fill(0);
                 std::mem::swap(&mut self.gfx_fb, &mut self.scratch_fb);
                 self.draw_pix_unit(kind, beat, 1.0);
-                // gfx_fb now holds this unit; blend it over the picture
-                // that was there, weighted by the fader.
                 std::mem::swap(&mut self.gfx_fb, &mut self.scratch_fb);
+                // The channel's COLOR knob shades its own contribution,
+                // exactly as it shades a cell channel's winning cells —
+                // parity the knob did not have on pixel units before.
+                if self.scfx_on && (self.channels[i].color - 0.5).abs() > 0.04 {
+                    let sc = scfx::Scfx {
+                        kind: self.scfx_type,
+                        knob: self.channels[i].color,
+                    };
+                    let w = self.scratch_fb.w as usize;
+                    let probe = pass::CellCtx {
+                        drive: &self.drive,
+                        t: self.vt,
+                        beat,
+                        x: 0,
+                        y: 0,
+                        w: self.scratch_fb.w.min(u16::MAX as u32) as u16,
+                        intensity: self.intensity,
+                        hue_base: self.hue_base,
+                        accent: self.accent,
+                    };
+                    for y in 0..self.scratch_fb.h as usize {
+                        for x in 0..w {
+                            let px = 3 * (y * w + x);
+                            let c = Color::Rgb(
+                                self.scratch_fb.px[px],
+                                self.scratch_fb.px[px + 1],
+                                self.scratch_fb.px[px + 2],
+                            );
+                            let cctx = pass::CellCtx {
+                                x: x.min(u16::MAX as usize) as u16,
+                                y: y.min(u16::MAX as usize) as u16,
+                                ..probe
+                            };
+                            if let Color::Rgb(r, g, b) = sc.map(c, &cctx) {
+                                self.scratch_fb.px[px] = r;
+                                self.scratch_fb.px[px + 1] = g;
+                                self.scratch_fb.px[px + 2] = b;
+                            }
+                        }
+                    }
+                }
+                // Blend it over the picture that was there, weighted by
+                // the fader.
                 let k = level.clamp(0.0, 1.0);
                 for (dst, src) in self.gfx_fb.px.iter_mut().zip(self.scratch_fb.px.iter()) {
                     *dst = (*dst as f64 * (1.0 - k) + *src as f64 * k) as u8;
@@ -1122,6 +1252,10 @@ impl App {
                 .feedback
                 .apply(&mut self.gfx_fb, &self.drive, self.intensity),
         }
+        // The frame-wide treatments and the pad passes land here too, or
+        // the layer under the cells tells a different story from them.
+        self.apply_passes_over_fb(beat);
+        self.triggers.post_fb(&mut self.gfx_fb, beat);
         // z=-1: below the cell layer, so default-background cells show it
         // through and the two tiers composite in one pass.
         graphics::transmit_placed(out, &self.gfx_fb, 1, cols, rows, -1)
