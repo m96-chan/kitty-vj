@@ -16,42 +16,30 @@ use std::rc::Rc;
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
-use super::{Effect, FrameCtx, ramp_glyph};
+use super::{Effect, FrameCtx};
 use crate::capture::Capture;
+use crate::source::{CellStyle, draw_cells};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode {
-    /// Full colour, two pixels per cell.
-    Halfblock,
-    /// Luminance to glyph density, the terminal-native reading.
-    Ascii,
-    /// Glyph density from luminance, colour kept — the two at once.
-    AsciiColour,
+fn style_name(s: CellStyle) -> &'static str {
+    match s {
+        CellStyle::Halfblock => "HALF",
+        CellStyle::Ascii => "ASCII",
+        CellStyle::AsciiColour => "ASCII+C",
+    }
 }
 
-impl Mode {
-    fn name(&self) -> &'static str {
-        match self {
-            Mode::Halfblock => "HALF",
-            Mode::Ascii => "ASCII",
-            Mode::AsciiColour => "ASCII+C",
-        }
-    }
-
-    fn next(&self) -> Mode {
-        match self {
-            Mode::Halfblock => Mode::Ascii,
-            Mode::Ascii => Mode::AsciiColour,
-            Mode::AsciiColour => Mode::Halfblock,
-        }
+fn next_style(s: CellStyle) -> CellStyle {
+    match s {
+        CellStyle::Halfblock => CellStyle::Ascii,
+        CellStyle::Ascii => CellStyle::AsciiColour,
+        CellStyle::AsciiColour => CellStyle::Halfblock,
     }
 }
 
 pub struct CamFx {
     cap: Rc<RefCell<Option<Capture>>>,
-    mode: Mode,
+    mode: CellStyle,
     /// Mirror the picture. A camera pointed at the operator reads wrong
     /// unless it is flipped, and a projected VJ feed almost always wants
     /// the mirror.
@@ -62,7 +50,7 @@ impl CamFx {
     pub fn new(cap: Rc<RefCell<Option<Capture>>>) -> Self {
         Self {
             cap,
-            mode: Mode::Halfblock,
+            mode: CellStyle::Halfblock,
             mirror: true,
         }
     }
@@ -76,7 +64,7 @@ impl Effect for CamFx {
     fn on_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char('v') => {
-                self.mode = self.mode.next();
+                self.mode = next_style(self.mode);
                 true
             }
             KeyCode::Char('V') => {
@@ -92,64 +80,28 @@ impl Effect for CamFx {
         let c = cap.as_ref()?;
         Some(format!(
             "{} {}{}",
-            self.mode.name(),
+            style_name(self.mode),
             if c.alive() { "live" } else { "..." },
             if self.mirror { " mir" } else { "" }
         ))
     }
 
     fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &FrameCtx) {
-        if area.width < 2 || area.height < 2 {
-            return;
-        }
         let cap = self.cap.borrow();
         let Some(img) = cap.as_ref().and_then(|c| c.latest()) else {
             return;
         };
-        let (sw, sh) = (img.width() as f64, img.height() as f64);
-
-        // Cover fit, with a beat punch — the same camera language the
-        // rest of the plates speak.
-        let (tw, th) = (area.width as f64, area.height as f64 * 2.0);
-        let punch = 1.0 + 0.08 * ctx.drive.gbeat() * (0.3 + 0.7 * ctx.intensity);
-        let zoom = (tw / sw).max(th / sh) * punch;
-
-        let sample = |px: f64, py: f64| -> (u8, u8, u8) {
-            let x = if self.mirror { tw - px } else { px };
-            let sx = ((x - tw / 2.0) / zoom + sw / 2.0).clamp(0.0, sw - 1.0) as u32;
-            let sy = ((py - th / 2.0) / zoom + sh / 2.0).clamp(0.0, sh - 1.0) as u32;
-            let p = img.get_pixel(sx, sy).0;
-            (p[0], p[1], p[2])
-        };
-
-        for cy in 0..area.height {
-            for cx in 0..area.width {
-                let cell = &mut buf[(area.x + cx, area.y + cy)];
-                match self.mode {
-                    Mode::Halfblock => {
-                        let t = sample(cx as f64 + 0.5, cy as f64 * 2.0 + 0.5);
-                        let b = sample(cx as f64 + 0.5, cy as f64 * 2.0 + 1.5);
-                        cell.set_char('▀');
-                        cell.set_fg(Color::Rgb(t.0, t.1, t.2));
-                        cell.set_bg(Color::Rgb(b.0, b.1, b.2));
-                    }
-                    Mode::Ascii | Mode::AsciiColour => {
-                        // One glyph per cell, so sample the cell's middle
-                        // rather than either half.
-                        let (r, g, b) = sample(cx as f64 + 0.5, cy as f64 * 2.0 + 1.0);
-                        let l = crate::pass::luma(r as f64, g as f64, b as f64) / 255.0;
-                        cell.set_char(ramp_glyph(l));
-                        if self.mode == Mode::Ascii {
-                            let v = (l * 255.0) as u8;
-                            cell.set_fg(Color::Rgb(v, v, v));
-                        } else {
-                            cell.set_fg(Color::Rgb(r, g, b));
-                        }
-                        cell.set_bg(Color::Reset);
-                    }
-                }
-            }
-        }
+        // Both tiers draw an image the same way, so this is the same
+        // call the pixel tier makes — see source.rs for why.
+        draw_cells(
+            buf,
+            area,
+            &img,
+            self.mode,
+            ctx.drive.gbeat(),
+            ctx.intensity,
+            self.mirror,
+        );
     }
 }
 
@@ -193,13 +145,13 @@ mod tests {
     #[test]
     fn keys_cycle_the_mode_and_the_mirror() {
         let mut fx = CamFx::new(Rc::new(RefCell::new(None)));
-        assert_eq!(fx.mode, Mode::Halfblock);
+        assert_eq!(fx.mode, CellStyle::Halfblock);
         assert!(fx.on_key(KeyCode::Char('v')));
-        assert_eq!(fx.mode, Mode::Ascii);
+        assert_eq!(fx.mode, CellStyle::Ascii);
         assert!(fx.on_key(KeyCode::Char('v')));
-        assert_eq!(fx.mode, Mode::AsciiColour);
+        assert_eq!(fx.mode, CellStyle::AsciiColour);
         assert!(fx.on_key(KeyCode::Char('v')));
-        assert_eq!(fx.mode, Mode::Halfblock);
+        assert_eq!(fx.mode, CellStyle::Halfblock);
 
         assert!(fx.mirror, "a camera pointed at you reads wrong unmirrored");
         assert!(fx.on_key(KeyCode::Char('V')));

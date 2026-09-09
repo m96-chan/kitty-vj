@@ -28,6 +28,7 @@ mod rng;
 mod scene;
 mod scfx;
 mod show;
+mod source;
 mod transition;
 mod triggers;
 
@@ -76,6 +77,36 @@ const PIX_FX: [(&str, PixFn); 3] = [
     ("TUNNEL", pixfx::tunnel),
     ("STARS", pixfx::starfield),
 ];
+
+/// What feeds the pixel tier. A generated field is a function of beat;
+/// an image source is a function of position, and `source.rs` draws
+/// those for both tiers so the camera cannot drift between them.
+#[derive(Clone, Copy, PartialEq)]
+enum PixSource {
+    Generated(usize),
+    Cam,
+    Plate,
+}
+
+impl PixSource {
+    fn name(&self) -> &'static str {
+        match self {
+            PixSource::Generated(i) => PIX_FX[*i].0,
+            PixSource::Cam => "CAM",
+            PixSource::Plate => "PLATE",
+        }
+    }
+
+    /// Cycle generators, then the two image sources.
+    fn next(&self) -> PixSource {
+        match self {
+            PixSource::Generated(i) if i + 1 < PIX_FX.len() => PixSource::Generated(i + 1),
+            PixSource::Generated(_) => PixSource::Cam,
+            PixSource::Cam => PixSource::Plate,
+            PixSource::Plate => PixSource::Generated(0),
+        }
+    }
+}
 
 /// Ported particle modes. They take the drive signals and composite
 /// additively, so they get their own table and their own call shape.
@@ -240,7 +271,9 @@ struct App {
     gfx: bool,
     gfx_fb: graphics::Framebuffer,
     /// Which pixel effect (index into PIX_FX) when in graphics mode.
-    pix: usize,
+    pix: PixSource,
+    /// Which plate the pixel tier shows when PLATE is its source.
+    pix_plate: usize,
     /// Which ported particle mode is stacked on top; None = off.
     part: Option<usize>,
     /// Post pass over the pixel frame.
@@ -349,7 +382,8 @@ impl App {
             scratch: Vec::new(),
             gfx: false,
             gfx_fb: graphics::Framebuffer::new(1, 1),
-            pix: 0,
+            pix: PixSource::Generated(0),
+            pix_plate: 0,
             part: None,
             pix_post: 0,
             capture: cap_shared,
@@ -446,7 +480,7 @@ impl App {
             KeyCode::Char('[') => self.lyrics.nudge(-0.25),
             KeyCode::Char(']') => self.lyrics.nudge(0.25),
             KeyCode::Char('g') => self.gfx = !self.gfx,
-            KeyCode::Char('p') => self.pix = (self.pix + 1) % PIX_FX.len(),
+            KeyCode::Char('p') => self.pix = self.pix.next(),
             KeyCode::Char('P') => self.pix_post = (self.pix_post + 1) % PIX_POSTS.len(),
             KeyCode::Char('M') => self.mesh = (self.mesh + 1) % MESH_MODES.len(),
             KeyCode::Char(';') => {
@@ -929,7 +963,34 @@ impl App {
         };
         self.gfx_fb.resize(pw, ph);
         let beat = self.triggers.warp_beat(self.clock.beat()) + self.jog_offset();
-        PIX_FX[self.pix].1(&mut self.gfx_fb, beat, self.intensity);
+        // Image sources land straight in the framebuffer, so every post
+        // pass below applies to a camera or a plate exactly as it does
+        // to a generated field.
+        match self.pix {
+            PixSource::Generated(i) => PIX_FX[i].1(&mut self.gfx_fb, beat, self.intensity),
+            PixSource::Cam => {
+                if let Some(img) = self.capture.borrow().as_ref().and_then(|c| c.latest()) {
+                    source::draw_pixels(
+                        &mut self.gfx_fb,
+                        &img,
+                        self.drive.gbeat(),
+                        self.intensity,
+                        true,
+                    );
+                }
+            }
+            PixSource::Plate => {
+                if let Some(p) = self.plates.get(self.pix_plate % self.plates.len().max(1)) {
+                    source::draw_pixels(
+                        &mut self.gfx_fb,
+                        &p.img,
+                        self.drive.gbeat(),
+                        self.intensity,
+                        false,
+                    );
+                }
+            }
+        }
         // Mesh geometry is opaque and carries the frame, so the base
         // effect behind it ducks by the mode's own amount before the
         // solid passes land.
@@ -1316,7 +1377,7 @@ impl App {
             } else {
                 String::new()
             };
-            format!("▓{}{mesh}{part}{post} ", PIX_FX[self.pix].0)
+            format!("▓{}{mesh}{part}{post} ", self.pix.name())
         } else {
             String::new()
         };
