@@ -35,6 +35,7 @@ mod source;
 mod transition;
 mod triggers;
 mod units;
+mod wfr;
 
 use std::time::{Duration, Instant};
 

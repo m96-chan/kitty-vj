@@ -345,7 +345,17 @@ pub fn speaker_wire(
             let xf = Transform::from_euler(0.0, 0.0, roll)
                 .with_uniform_scale(rank.size * (1.0 + SWELL * v))
                 .with_translation(pos);
-            crate::meshwire::draw_wire_mesh(&mut ras, &mesh, &xf, scr, width, col);
+            // The woofer is watertight and consistently wound, so the
+            // back half is pure fill cost reading as mush — cull it.
+            crate::meshwire::draw_wire_mesh_culled(
+                &mut ras,
+                &mesh,
+                &xf,
+                scr,
+                width,
+                col,
+                crate::raster::Cull::Back,
+            );
         }
     }
 }

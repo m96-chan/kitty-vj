@@ -189,9 +189,15 @@ const PHASE: [Vec3; 3] = [
     v3(4.23, 1.31, 2.77),
 ];
 
-/// Wire tessellation around each woofer. Sparser than the lit wall on
-/// purpose — a wireframe reads by its lines, and hero-density lines
-/// melt into fill.
+/// Grid resolution the baked print model is clustered at, per driver —
+/// the hero gets the finest wire. See `wfr` for why it is thinned at
+/// all: twelve thousand triangles were free on the original's GPU and
+/// are not free here.
+const WIRE_LOD: [u32; 3] = [14, 9, 9];
+
+/// Fallback tessellation for the *generated* woofer, used only if the
+/// embedded payload fails to decode. Sparser than the lit wall on
+/// purpose — a wireframe reads by its lines.
 const WIRE_SEG: [usize; 3] = [16, 12, 12];
 
 /// Cone excursion per unit drive — the original's `aPunch` coefficient,
@@ -324,24 +330,93 @@ struct Look {
 }
 
 /// The three woofers, tumbling. "The same woofer" as the lit wall, per
-/// the original — its cone punched by the live drive, the geometry
-/// rebuilt per frame exactly as the wall rebuilds its ranks. The punch
-/// also lifts the glow (the original's `1.7 * |vPunch|` term), so a
-/// kick reads as the cone lunging *and* flaring.
+/// the original — and since the payload ships in the repo, it is the
+/// actual "woofer print 04" mesh, clustered down to rasteriser budget.
+/// The cone is punched by the live drive per frame (the original did it
+/// in the vertex shader), and the punch also lifts the glow (its
+/// `1.7 * |vPunch|` term), so a kick reads as the cone lunging *and*
+/// flaring. If the payload ever fails to decode, the generated woofer
+/// stands in rather than the mode going dark.
 fn draw_drivers(ras: &mut Raster, scr: Screen, beat: f64, d: &Drive, look: &Look) {
     let phase = spin_phase(beat);
     let drive = crate::meshspeaker::ring_drive(d, beat, 0.0);
     let punch = PUNCH * drive;
     let level = look.level * (1.0 + 1.5 * punch);
+    let baked = wire_drivers();
     for (i, drv) in DRIVERS.iter().enumerate() {
-        let mesh = crate::meshspeaker::woofer(punch, WIRE_SEG[i]);
+        let mesh = match baked {
+            Some(w) => punched(&w[i], punch),
+            None => crate::meshspeaker::woofer(punch, WIRE_SEG[i]),
+        };
         let xf = Transform::IDENTITY
             .with_rot(driver_rot(phase, i))
             .with_uniform_scale(drv.scale * (1.0 + 0.10 * drive))
             .with_translation(drv.pos);
         let col = scaled(mix(look.ca, look.cb, i as f64 * 0.5), level);
-        draw_wire_mesh(ras, &mesh, &xf, scr, look.width_px, col);
+        draw_wire_mesh_culled(
+            ras,
+            &mesh,
+            &xf,
+            scr,
+            look.width_px,
+            col,
+            crate::raster::Cull::Back,
+        );
     }
+}
+
+/// One clustered driver: positions plus each vertex's cone response,
+/// precomputed so the per-frame punch is a multiply-add.
+struct WireDriver {
+    verts: Vec<(Vec3, f64)>,
+    tris: Vec<[u32; 3]>,
+}
+
+/// The baked mesh, embedded at compile time so a gig cannot lose it —
+/// the original warns "woofer mesh missing, its modes are disabled"
+/// when the sidecar is absent, a failure a live instrument cannot ship.
+const WOOFER_WFR: &[u8] = include_bytes!("../assets/models/woofer.wfr");
+
+fn wire_drivers() -> &'static Option<[WireDriver; 3]> {
+    static D: OnceLock<Option<[WireDriver; 3]>> = OnceLock::new();
+    D.get_or_init(|| {
+        let baked = crate::wfr::decode(WOOFER_WFR)?;
+        Some(std::array::from_fn(|i| {
+            let m = crate::wfr::cluster(&baked, WIRE_LOD[i]);
+            WireDriver {
+                verts: m.verts.iter().map(|&v| (v, cone_factor(v))).collect(),
+                tris: m.tris,
+            }
+        }))
+    })
+}
+
+/// The original vertex shader's cone mask, verbatim:
+/// `smoothstep(0.80, 0.58, r) * smoothstep(-0.52, -0.30, z)` — one on
+/// the dust cap and cone, easing to zero across the surround and
+/// everything behind. GLSL's reversed-edge smoothstep included.
+fn cone_factor(v: Vec3) -> f64 {
+    let ss = |e0: f64, e1: f64, x: f64| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    ss(0.80, 0.58, v.x.hypot(v.y)) * ss(-0.52, -0.30, v.z)
+}
+
+/// The driver with its cone thrown forward by `punch` model units —
+/// expanded through `Mesh::tri`, whose canonical barycentrics light all
+/// three edges of every triangle, exactly as the original's expansion
+/// (`bary[i*3 + i%3] = 1`) did.
+fn punched(w: &WireDriver, punch: f64) -> Mesh {
+    let mut m = Mesh::new();
+    let at = |i: u32| {
+        let (v, cone) = w.verts[i as usize];
+        Vertex::at(v3(v.x, v.y, v.z + cone * punch))
+    };
+    for &[a, b, c] in &w.tris {
+        m.tri(at(a), at(b), at(c));
+    }
+    m
 }
 
 /// One blast, identified by the beat line that fired it.
@@ -475,7 +550,25 @@ pub(crate) fn draw_wire_mesh(
     width_px: f64,
     col: (f64, f64, f64),
 ) {
-    let opts = DrawOpts::wire();
+    draw_wire_mesh_culled(ras, mesh, xf, scr, width_px, col, crate::raster::Cull::None)
+}
+
+/// As [`draw_wire_mesh`], with the cull chosen by the caller. A dense
+/// watertight solid drawn as wire pays its whole cost in fill, and the
+/// back half of it is fill that reads as mush — culling it halves the
+/// frame cost and cleans the picture. A flat thing (the blast ring)
+/// must keep both sides.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_wire_mesh_culled(
+    ras: &mut Raster,
+    mesh: &Mesh,
+    xf: &Transform,
+    scr: Screen,
+    width_px: f64,
+    col: (f64, f64, f64),
+    cull: crate::raster::Cull,
+) {
+    let opts = DrawOpts::wire().with_cull(cull);
     let width = if width_px.is_finite() {
         width_px.max(0.1)
     } else {
@@ -972,23 +1065,48 @@ mod tests {
         assert_eq!(pulse_integral(-3.0, 1.0, 0.14), 0.0);
     }
 
+    /// Not a correctness check — the budget probe for the clustered
+    /// print model. `cargo test --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing"]
+    fn budget_probe() {
+        let (w, h) = (1200u32, 700u32);
+        let mut fb = Framebuffer::new(w, h);
+        let mut db = DepthBuffer::new(w, h);
+        let d = hot();
+        for i in 0..20 {
+            wire(&mut fb, &mut db, 4.0 + i as f64 * 0.01, 1.0, &d, A, B);
+        }
+        const N: u32 = 120;
+        let t0 = std::time::Instant::now();
+        for i in 0..N {
+            wire(&mut fb, &mut db, 4.0 + i as f64 * 0.017, 1.0, &d, A, B);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0 / N as f64;
+        println!("wire: {ms:.3} ms/frame at {w}x{h}");
+    }
+
     #[test]
     fn geometry_stays_inside_the_budget() {
-        // The drivers are real woofers now; the budget moves with the
-        // wire tessellation table, not with a hardcoded count.
-        let driver_tris: usize = WIRE_SEG
-            .iter()
-            .map(|&s| crate::meshspeaker::woofer(0.0, s).tris.len())
-            .sum();
+        // The drivers are the clustered print model; the budget moves
+        // with WIRE_LOD, and this is where a lod bump gets caught
+        // before it costs milliseconds on the Air.
+        let w = wire_drivers().as_ref().expect("payload must decode");
+        let driver_tris: usize = w.iter().map(|d| d.tris.len()).sum();
         assert!(
-            (300..1200).contains(&driver_tris),
+            (3000..10_000).contains(&driver_tris),
             "driver triangle count {driver_tris} left its band"
         );
+        // The cone mask holds somewhere and releases somewhere, or the
+        // punch would move the whole solid / nothing at all.
+        let hero = &w[0];
+        assert!(hero.verts.iter().any(|&(_, c)| c > 0.9));
+        assert!(hero.verts.iter().any(|&(_, c)| c < 0.05));
         let g = geometry();
         assert_eq!(g.ring.tris.len(), RING_SEGS * 2);
         // Worst case a frame can reach: every pool slot alive at once.
         let worst = driver_tris + BLAST_POOL as usize * g.ring.tris.len();
-        assert!(worst < 1800, "worst-case triangle count is {worst}");
+        assert!(worst < 12_000, "worst-case triangle count is {worst}");
         // What it actually reaches at the reference tempo.
         let alive = (0..BLAST_POOL)
             .filter(|k| blast_state(20 - k, 20.4).is_some())
