@@ -600,6 +600,17 @@ pub(crate) fn draw_wire_mesh_culled(
         let Some(fw) = bary_fwidth([p0, p1, p2], &bary) else {
             continue;
         };
+        // A triangle can honestly light about perimeter × width pixels.
+        // One projected smaller than that — sub-pixel detail on the
+        // print model, or a sliver the clustering made — has edge ≈ 1
+        // everywhere and flares as a stray dot or line stuck to the
+        // mesh. Scale it back to the energy real lines would have lit;
+        // below a twentieth it is noise, not geometry, and is skipped.
+        let cover = wire_cover([p0, p1, p2], width);
+        if cover < 0.05 {
+            continue;
+        }
+        let col = scaled(col, cover);
         let tri = [
             Vertex::at(world[0]).with_bary(bary[0]),
             Vertex::at(world[1]).with_bary(bary[1]),
@@ -640,6 +651,26 @@ fn edge_shade(
         return None;
     }
     Some((byte(col.0 * k), byte(col.1 * k), byte(col.2 * k)))
+}
+
+/// How much of its edge-lit energy a projected triangle deserves:
+/// `area / (perimeter × width)`, clamped to one.
+///
+/// A healthy triangle has far more area than its wire will light and
+/// passes through untouched. A sub-pixel or sliver triangle would
+/// light its *entire* area (the fwidth threshold swallows all of it),
+/// which on the GPU original — the full 12k-triangle mesh at 1080p —
+/// merged into shimmer, but on a clustered mesh at terminal resolution
+/// reads as isolated garbage pixels riding the speaker.
+fn wire_cover(p: [(f64, f64); 3], width_px: f64) -> f64 {
+    let area = area2(p[0], p[1], p[2]).abs() * 0.5;
+    let d = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1);
+    let perim = d(p[0], p[1]) + d(p[1], p[2]) + d(p[2], p[0]);
+    let lit = perim * width_px.max(0.1);
+    if !area.is_finite() || !lit.is_finite() || lit <= 0.0 {
+        return 0.0;
+    }
+    (area / lit).clamp(0.0, 1.0)
 }
 
 /// Screen-space derivative of each barycentric channel over one triangle,
@@ -1084,6 +1115,25 @@ mod tests {
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0 / N as f64;
         println!("wire: {ms:.3} ms/frame at {w}x{h}");
+    }
+
+    #[test]
+    fn tiny_and_sliver_triangles_are_dimmed_not_flared() {
+        // A healthy triangle keeps its energy.
+        let healthy = wire_cover([(0.0, 0.0), (40.0, 0.0), (0.0, 40.0)], 1.0);
+        assert!((healthy - 1.0).abs() < 1e-9, "healthy dimmed: {healthy}");
+        // A sub-pixel triangle is (nearly) discarded…
+        let dot = wire_cover([(0.0, 0.0), (0.7, 0.1), (0.2, 0.6)], 1.0);
+        assert!(dot < 0.2, "sub-pixel dot too bright: {dot}");
+        // …and so is a long sliver, whose area never covers its wire.
+        let sliver = wire_cover([(0.0, 0.0), (80.0, 0.4), (40.0, 0.6)], 1.0);
+        assert!(sliver < 0.2, "sliver too bright: {sliver}");
+        // A degenerate one is exactly zero, not NaN.
+        assert_eq!(wire_cover([(1.0, 1.0); 3], 1.0), 0.0);
+        // Wider wire lowers the bar — the same triangle affords less.
+        let thin = wire_cover([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)], 0.8);
+        let fat = wire_cover([(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)], 1.6);
+        assert!(fat < thin);
     }
 
     #[test]
