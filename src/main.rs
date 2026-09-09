@@ -3,6 +3,7 @@ mod audio;
 mod camera;
 mod capture;
 mod clock;
+mod combo;
 mod config;
 mod drive;
 mod effects;
@@ -98,6 +99,24 @@ fn build_effects(
     }
     effects.push(Box::new(CamFx::new(cap)));
     effects
+}
+
+/// Visit a slot's drawable parts with the share of the fader each one
+/// takes: a base unit is itself at full share, a combo is its recipe.
+/// One level of expansion — combos hold base units by construction.
+fn each_part(
+    combos: &[combo::Combo],
+    slot: units::Unit,
+    mut f: impl FnMut(units::Unit, f64),
+) {
+    match slot {
+        units::Unit::Combo(i) => {
+            for &(u, w) in &combos[i].parts {
+                f(u, w);
+            }
+        }
+        u => f(u, 1.0),
+    }
 }
 
 fn build_unit_list(n_cell: usize, cell_names: &[&'static str]) -> Vec<(&'static str, units::Unit)> {
@@ -238,6 +257,12 @@ struct App {
     prolink_err: Option<String>,
     /// Everything a channel can hold, cells and pixels in one list.
     unit_list: Vec<(&'static str, units::Unit)>,
+    /// Channel scenes — the combinations `Unit::Combo` indexes into.
+    combos: Vec<combo::Combo>,
+    /// The config's raw scene lines, kept verbatim so `save_bindings`
+    /// (which rebuilds the file from app state on every MIDI learn)
+    /// writes them back instead of eating them.
+    scene_defs: Vec<(String, String)>,
     /// Four mixer channels, composited bottom (1) to top (4).
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
@@ -302,7 +327,14 @@ impl App {
             cell_names.iter().all(|n| effects::CELL_NAMES.contains(n)),
             "an effect name is missing from effects::CELL_NAMES"
         );
-        let unit_list = build_unit_list(effects.len(), &cell_names);
+        let mut unit_list = build_unit_list(effects.len(), &cell_names);
+        // Channel scenes join the same list, after the base units so
+        // they can never shadow one and the digit keys keep meaning
+        // what they meant.
+        let combos = combo::build(&bindings.scenes, &unit_list);
+        for (i, c) in combos.iter().enumerate() {
+            unit_list.push((c.name, units::Unit::Combo(i)));
+        }
         Self {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
@@ -346,6 +378,8 @@ impl App {
             prolink_sync: false,
             prolink_err: None,
             unit_list,
+            combos,
+            scene_defs: bindings.scenes.clone(),
             channels: std::array::from_fn(|i| Channel {
                 slot: units::Unit::Cell(i),
                 level: if i == 0 { 1.0 } else { 0.0 },
@@ -656,12 +690,20 @@ impl App {
         self.channels[self.focus].slot = self.unit_list[next].1;
     }
 
-    /// Is any channel holding a pixel unit at an audible level? That is
-    /// all "the graphics tier is on" ever meant.
+    /// Is any channel bringing pixel parts at an audible level? That is
+    /// all "the graphics tier is on" ever meant — and with combos in
+    /// the list it is a question about a slot's parts, not its variant.
     fn pixel_channels_live(&self) -> bool {
-        self.channels
-            .iter()
-            .any(|c| c.slot.medium() == units::Medium::Pixels && c.level > 0.004)
+        self.channels.iter().any(|c| {
+            if c.level <= 0.004 {
+                return false;
+            }
+            let mut px = false;
+            each_part(&self.combos, c.slot, |u, _| {
+                px |= matches!(u, units::Unit::Pixel(_));
+            });
+            px
+        })
     }
 
     /// Draw one pixel-medium unit into the framebuffer. `gain` scales
@@ -1049,6 +1091,7 @@ impl App {
                 .scfx_on
                 .then(|| scfx::TYPES.iter().position(|t| *t == self.scfx_type))
                 .flatten(),
+            scenes: self.scene_defs.clone(),
         };
         let _ = config::save(&config::path(), &b);
     }
@@ -1230,22 +1273,29 @@ impl App {
         self.gfx_fb.resize(pw, ph);
         let beat = self.vbeat();
 
-        // Pixel-medium channels, bottom to top, each scaled by its own
-        // fader. A unit that establishes the picture is blended in; one
-        // that composites (particles, the wire rig) is drawn straight on
-        // top, because that is what additive means.
+        // Pixel-medium parts, channels bottom to top, each scaled by
+        // fader × its share of the slot (a combo brings several parts,
+        // a base unit brings itself at full share). A unit that
+        // establishes the picture is blended in; one that composites
+        // (particles, the wire rig) is drawn straight on top, because
+        // that is what additive means.
         self.gfx_fb.px.fill(0);
         if self.scratch_fb.w != pw || self.scratch_fb.h != ph {
             self.scratch_fb = graphics::Framebuffer::new(pw, ph);
         }
+        let mut jobs: Vec<(usize, units::Pix, f64)> = Vec::new();
         for i in 0..CHANNELS {
-            let (slot, level) = (self.channels[i].slot, self.channels[i].level);
-            let units::Unit::Pixel(kind) = slot else {
-                continue;
-            };
+            let level = self.channels[i].level;
             if level <= 0.004 {
                 continue;
             }
+            each_part(&self.combos, self.channels[i].slot, |u, w| {
+                if let units::Unit::Pixel(kind) = u {
+                    jobs.push((i, kind, level * w));
+                }
+            });
+        }
+        for (i, kind, level) in jobs {
             // Solid geometry ducks what is already there so it carries
             // the frame, exactly as the mode used to.
             let dim = kind.dim_behind();
@@ -1375,43 +1425,54 @@ impl App {
         // faders at full = a quarter of the cells each; one fader alone
         // at 30% = 30% of its cells. The per-cell hash is fixed, so the
         // allocation is stable frame to frame instead of boiling.
-        // Only the cell-medium channels enter the lottery. A channel
-        // holding a pixel unit draws into the shared framebuffer
-        // instead, and that lands under the cells — see render_pixels.
-        let active: Vec<usize> = (0..CHANNELS)
-            .filter(|&i| {
-                self.channels[i].level > 0.004
-                    && self.channels[i].slot.medium() == units::Medium::Cells
-            })
-            .collect();
-        if self.scratch.len() != CHANNELS || self.scratch[0].area != stage {
-            self.scratch = (0..CHANNELS)
+        // Only the cell-medium parts enter the lottery — a combo brings
+        // its cell parts here and its pixel parts to render_pixels, at
+        // fader × share each. Pixel parts land under the cells instead.
+        // (channel, effect, gain), channels bottom to top.
+        let mut contrib: Vec<(usize, usize, f64)> = Vec::new();
+        for i in 0..CHANNELS {
+            let level = self.channels[i].level;
+            if level <= 0.004 {
+                continue;
+            }
+            each_part(&self.combos, self.channels[i].slot, |u, w| {
+                if let units::Unit::Cell(e) = u {
+                    contrib.push((i, e, level * w));
+                }
+            });
+        }
+        // Four channels of eight-part combos at most — the lottery's
+        // contender array is sized against this.
+        contrib.truncate(CHANNELS * combo::MAX_PARTS);
+        let need = contrib.len().max(1);
+        if self.scratch.len() < need || self.scratch[0].area != stage {
+            self.scratch = (0..need)
                 .map(|_| ratatui::buffer::Buffer::empty(stage))
                 .collect();
         }
-        for &i in &active {
-            self.scratch[i].reset();
-            if let units::Unit::Cell(e) = self.channels[i].slot {
-                self.effects[e].render(&mut self.scratch[i], stage, &ctx);
-            }
+        // One scratch per contribution, not per channel: two parts of
+        // one combo need two buffers.
+        for (k, &(_, e, _)) in contrib.iter().enumerate() {
+            self.scratch[k].reset();
+            self.effects[e].render(&mut self.scratch[k], stage, &ctx);
         }
         for y in 0..stage.height {
             for x in 0..stage.width {
                 let (ax, ay) = (stage.x + x, stage.y + y);
-                // Contenders: active channels whose effect touched this
-                // cell, top channel first.
+                // Contenders: contributions that touched this cell, top
+                // channel's parts first. (scratch idx, channel, gain).
                 let mut wsum = 0.0;
-                let mut parts: [(usize, f64); CHANNELS] = [(0, 0.0); CHANNELS];
+                let mut parts: [(usize, usize, f64); CHANNELS * combo::MAX_PARTS] =
+                    [(0, 0, 0.0); CHANNELS * combo::MAX_PARTS];
                 let mut n = 0;
-                for &i in active.iter().rev() {
-                    let cell = &self.scratch[i][(ax, ay)];
+                for (k, &(i, _, gain)) in contrib.iter().enumerate().rev() {
+                    let cell = &self.scratch[k][(ax, ay)];
                     if cell.symbol() == " " && cell.bg == Color::Reset {
                         continue; // untouched = transparent
                     }
-                    let l = self.channels[i].level;
-                    parts[n] = (i, l);
+                    parts[n] = (k, i, gain);
                     n += 1;
-                    wsum += l;
+                    wsum += gain;
                 }
                 if n == 0 {
                     continue;
@@ -1427,10 +1488,10 @@ impl App {
                 };
                 let r = rng::unit_f64(rng::hash3(x as u64, y as u64, salt)) * (wsum + bg);
                 let mut acc = 0.0;
-                for &(i, l) in &parts[..n] {
+                for &(k, i, l) in &parts[..n] {
                     acc += l;
                     if r < acc {
-                        let mut cell = self.scratch[i][(ax, ay)].clone();
+                        let mut cell = self.scratch[k][(ax, ay)].clone();
                         // The winning channel's COLOR knob shades its
                         // cells — only while the SCFX section is lit.
                         // Both of these are the same shape — a colour in,
@@ -1627,7 +1688,7 @@ impl App {
         let beat_in_bar = ctx.bar_phase as i64 + 1;
         let status = match self.channels[self.focus].slot {
             units::Unit::Cell(i) => self.effects[i].status(),
-            units::Unit::Pixel(_) => None,
+            units::Unit::Pixel(_) | units::Unit::Combo(_) => None,
         }
         .map(|s| format!(" [{s}]"))
         .unwrap_or_default();

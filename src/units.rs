@@ -12,17 +12,9 @@
 //! channel holds any unit; the compositor renders the pixel-medium ones
 //! into the shared framebuffer and the cell-medium ones into cell
 //! buffers, and the framebuffer lands under the cells at z=-1 as before.
-//! There is no mode to be in.
-
-/// Which surface a unit draws into. The only thing that separates the
-/// two kinds, and the compositor's only reason to care.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Medium {
-    /// Glyphs with colours — halfblock, ASCII, box drawing.
-    Cells,
-    /// Full RGB pixels over the kitty graphics protocol.
-    Pixels,
-}
+//! There is no mode to be in. And since a combo bundles parts of either
+//! medium, the compositor asks each expanded part which variant it is
+//! rather than asking the slot for a single medium it may not have.
 
 /// A pixel-medium unit. Cell units are indices into the app's effect
 /// vec, because they carry state (a plate rotation, a camera handle);
@@ -74,15 +66,10 @@ pub enum Unit {
     /// Index into the app's `effects` vec.
     Cell(usize),
     Pixel(Pix),
-}
-
-impl Unit {
-    pub fn medium(&self) -> Medium {
-        match self {
-            Unit::Cell(_) => Medium::Cells,
-            Unit::Pixel(_) => Medium::Pixels,
-        }
-    }
+    /// Index into the app's combo vec — a channel scene, expanding to
+    /// several base units that share the channel's fader. Combos hold
+    /// base units only; the compositor expands one level and no more.
+    Combo(usize),
 }
 
 /// The pixel-medium units, in the order they appear after the cell ones.
@@ -106,12 +93,6 @@ pub const PIX_UNITS: [(&str, Pix); 12] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn medium_follows_the_unit_not_a_mode() {
-        assert_eq!(Unit::Cell(3).medium(), Medium::Cells);
-        assert_eq!(Unit::Pixel(Pix::Plasma).medium(), Medium::Pixels);
-    }
 
     #[test]
     fn additive_units_do_not_establish_the_picture() {

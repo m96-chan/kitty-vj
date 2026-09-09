@@ -75,6 +75,12 @@ pub struct Bindings {
     /// The knob only carries depth — which FX is lit is state the app
     /// must keep, and it must survive a restart.
     pub scfx_selected: Option<usize>,
+    /// Channel scenes: `scene.<NAME> = PLASMA*0.6 + MCUBE` lines, kept
+    /// as raw (name, recipe) pairs in file order. `combo.rs` parses the
+    /// recipes; this only carries them — and MUST round-trip through
+    /// `save`, which every MIDI learn calls, or a learn would silently
+    /// eat the operator's scene definitions.
+    pub scenes: Vec<(String, String)>,
 }
 
 pub const SCFX_KEYS: [&str; 6] = [
@@ -131,7 +137,10 @@ pub fn parse(text: &str) -> Bindings {
                 b.scfx_selected = SCFX_NAMES.iter().position(|n| *n == v);
             }
             k => {
-                if let Some(name) = k.strip_prefix("pad.")
+                if let Some(name) = k.strip_prefix("scene.") {
+                    b.scenes
+                        .push((name.trim().to_string(), val.trim().to_string()));
+                } else if let Some(name) = k.strip_prefix("pad.")
                     && let Some(i) = crate::triggers::PAD_NAMES.iter().position(|n| *n == name)
                 {
                     b.pads[i] = val.split(',').filter_map(parse_cc).collect();
@@ -193,6 +202,12 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
             ));
         }
     }
+    if !b.scenes.is_empty() {
+        out.push_str("# channel scenes: scene.<NAME> = UNIT*share + UNIT + …\n");
+        for (name, def) in &b.scenes {
+            out.push_str(&format!("scene.{name} = {def}\n"));
+        }
+    }
     std::fs::write(path, out)
 }
 
@@ -209,6 +224,11 @@ mod tests {
         };
         b.pads[0] = vec![(7, 16), (9, 16)]; // both decks
         b.pads[7] = vec![(7, 21)];
+        // A learn saves the whole file — scene lines must survive it.
+        b.scenes = vec![
+            ("ACID".into(), "STARS*0.9".into()),
+            ("MINE".into(), "PLASMA + RINGS*0.5".into()),
+        ];
         let dir = std::env::temp_dir().join("kitty-vj-conf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(PATH);
