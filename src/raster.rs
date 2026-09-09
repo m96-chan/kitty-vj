@@ -92,14 +92,14 @@ use std::ops::{Add, Mul, Neg, Sub};
 
 use crate::graphics::Framebuffer;
 
-/// Camera height on +Z, mirroring `pixparticles`' constant of the same
-/// name. Duplicated rather than shared because that module keeps its
-/// scene constants private; if one moves, move both.
+/// Camera height on +Z. This is the definition — `pixparticles` and the
+/// mesh modes import it rather than keeping their own, because they all
+/// composite into the same framebuffer and a camera that differed
+/// between them would frame two different worlds in one picture.
 pub const CAM_Z: f64 = 420.0;
 
-/// Nothing nearer than this is drawn. Same value, same reason as
-/// `pixparticles`: past it the projection divides by a depth heading for
-/// zero and a vertex smears off to infinity.
+/// Nothing nearer than this is drawn: past it the projection divides by
+/// a depth heading for zero and a vertex smears off to infinity.
 pub const NEAR: f64 = 40.0;
 
 /// Focal length as a fraction of framebuffer height — the wide lens the
@@ -359,8 +359,12 @@ impl Mesh {
     }
 
     /// The unit cube spanning ±1, six quads, outward normals, each face
-    /// carrying a full `0..1` UV square — the cube mode's geometry, and
+    /// carrying a full `0..1` UV square. Used by the wire mode and as
     /// the winding reference for [`Cull::Back`].
+    ///
+    /// Not the cube *mode's* geometry: `meshcube` builds its own faces
+    /// at ±0.5 so it can throw them apart individually, so the two are
+    /// half a scale factor apart and cannot be swapped.
     pub fn cube() -> Self {
         // Three consecutive corners and the outward normal, per face,
         // wound counter-clockwise seen from outside in the y-up world

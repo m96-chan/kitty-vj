@@ -178,8 +178,11 @@ impl Particle {
     pub fn name(&self) -> Option<&'static str> {
         match self {
             Particle::Off => None,
-            Particle::Sparks => Some("SPARKS"),
-            Particle::PxTunnel => Some("PXTUNNEL"),
+            // These must be the names in units::PIX_UNITS, not the
+            // names of the functions behind them: the cell effects share
+            // that list, and SPARKS and TUNNEL are already taken there.
+            Particle::Sparks => Some("SPARKS3D"),
+            Particle::PxTunnel => Some("TUBE"),
             Particle::Floor => Some("FLOOR"),
             Particle::Rings => Some("RINGS"),
         }
@@ -784,34 +787,33 @@ mod tests {
 
     #[test]
     fn pooled_names_match_the_wiring_tables() {
-        // The caller resolves these strings against CELL_POSTS,
-        // PIX_POSTS and PIX_PARTICLES in main.rs. A typo here is a
-        // silent no-op at showtime, so it is caught here instead.
-        const CELL: [&str; 7] = [
-            "SLICE", "GLITCH", "MIRV", "MIRQ", "PIXEL", "ZPUNCH", "SHAKE",
-        ];
-        const PIX: [&str; 8] = [
-            "WARP", "KALEID", "ZBLUR", "RGB", "EDGE", "BLOOM", "CRT", "FEEDBK",
-        ];
-        const PART: [&str; 4] = ["SPARKS", "PXTUNNEL", "FLOOR", "RINGS"];
+        // The caller resolves these strings against the real tables, so
+        // this test reads those rather than a copy of them. A copy is
+        // worse than no test: it keeps passing while a rename downstream
+        // turns the scene's choice into a silent no-op at showtime —
+        // which is exactly what happened when the pixel units were
+        // renamed and nothing noticed.
+        let cell_posts: Vec<&str> = crate::CELL_POSTS.iter().map(|(n, _)| *n).collect();
+        let pix_posts: Vec<&str> = crate::PIX_POSTS.iter().map(|(n, _)| *n).collect();
+        let unit_names: Vec<&str> = crate::units::PIX_UNITS.iter().map(|(n, _)| *n).collect();
         for style in STYLE_LIST {
             let p = &STYLES[style as usize];
             for h in p.hits {
                 if let Some(n) = h.cell_post() {
-                    assert!(CELL.contains(&n), "{n} is not a CELL_POSTS entry");
+                    assert!(cell_posts.contains(&n), "{n} is not a CELL_POSTS entry");
                 }
             }
             for post in p.posts {
                 let n = post.name();
                 assert!(
-                    CELL.contains(&n) || PIX.contains(&n),
+                    cell_posts.contains(&n) || pix_posts.contains(&n),
                     "{n} is in no post table"
                 );
                 assert!(post.cell_post().is_some() != post.pix_post().is_some());
             }
             for part in p.particles {
                 if let Some(n) = part.name() {
-                    assert!(PART.contains(&n), "{n} is not a PIX_PARTICLES entry");
+                    assert!(unit_names.contains(&n), "{n} is not a unit list entry");
                 }
             }
         }

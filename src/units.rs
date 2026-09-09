@@ -132,6 +132,22 @@ mod tests {
     }
 
     #[test]
+    fn pixel_unit_names_do_not_collide_with_the_cell_effects() {
+        // Both media share one list and the scene director addresses it
+        // by name, so a pixel unit called SPARKS would shadow the cell
+        // effect of that name for every scene that asked for one.
+        const CELL_EFFECT_NAMES: [&str; 9] = [
+            "PULSE", "RAIN", "TUNNEL", "COLLAPSE", "CUBE", "SPARKS", "IMGDUST", "PLATE", "CAM",
+        ];
+        for (n, _) in PIX_UNITS {
+            assert!(
+                !CELL_EFFECT_NAMES.contains(&n),
+                "{n} collides with a cell effect"
+            );
+        }
+    }
+
+    #[test]
     fn every_pixel_unit_is_named_once() {
         for (i, (n, _)) in PIX_UNITS.iter().enumerate() {
             assert!(!n.is_empty());

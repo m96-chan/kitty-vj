@@ -72,6 +72,11 @@ const CHANNELS: usize = 4;
 /// Every playable unit, cells and pixels alike, in the order the digit
 /// keys and TAB walk them. Built at startup because how many cell
 /// effects exist depends on whether there are plates.
+///
+/// Names must be unique across the whole list: the scene director names
+/// its choices as strings, and a collision would resolve to whichever
+/// entry came first — silently, and only for the scenes that picked the
+/// loser.
 fn build_unit_list(n_cell: usize, cell_names: &[&'static str]) -> Vec<(&'static str, units::Unit)> {
     let mut v: Vec<(&'static str, units::Unit)> = (0..n_cell)
         .map(|i| (cell_names[i], units::Unit::Cell(i)))

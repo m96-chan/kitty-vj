@@ -28,20 +28,14 @@ use crate::drive::Drive;
 use crate::graphics::Framebuffer;
 use crate::rng::{hash3, unit_f64};
 
-/// Camera sits here on +Z looking down -Z, as in the original scene.
-const CAM_Z: f64 = 420.0;
-/// Anything nearer than this is behind us; drop it rather than divide by
-/// a depth heading for zero.
-const NEAR: f64 = 40.0;
-/// Focal length, as a fraction of framebuffer height — about an 84°
-/// vertical field of view. Deliberately wide: these fields are built at a
-/// scale that encloses the camera, and a normal lens on a pane a few
-/// hundred pixels across frames a keyhole of them — the dust box lands
-/// entirely outside the frame on the bar, when it should be filling it.
-/// At this focal the far wall of the box, the tunnel mouth and the floor's
-/// far edge all sit just inside the frame, with the horizon a touch below
-/// the centre line.
-const FOCAL_FRAC: f64 = 0.55;
+// The camera these fields are seen through is the rasteriser's — one
+// definition, because the particles and the mesh modes composite into
+// the same framebuffer and must agree about the world they are in.
+//
+// The wide focal is deliberate and documented at its definition: these
+// fields are built at a scale that encloses the camera, and a normal
+// lens on a pane a few hundred pixels across frames a keyhole of them.
+use crate::raster::{CAM_Z, FOCAL_FRAC, NEAR};
 /// Widest a point splat gets, in pixels. The originals let `gl_PointSize`
 /// run; we cap it because a near point is otherwise a full-screen quad
 /// rasterised in scalar Rust.
