@@ -3,10 +3,16 @@
 //! channel, and estimates tempo from MIDI clock (0xF8, 24 ppqn) when a
 //! device sends it. CC mapping is learn-based: arm a target, move a
 //! control, bound.
+//!
+//! Ports are rescanned on a timer rather than opened once at launch.
+//! Controllers are routinely powered on after the software — rekordbox
+//! usually gets there first — and a kicked USB cable mid-set must not
+//! end the show's control surface for good. Reconnecting is the same
+//! code path as connecting, so there is nothing special about recovery.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use midir::{MidiInput, MidiInputConnection};
 
@@ -18,26 +24,87 @@ pub enum MidiEvent {
     Start,
 }
 
+/// How often to look for controllers that appeared or vanished. Cheap —
+/// enumerating CoreMIDI sources is a handful of microseconds — and a
+/// second is well inside the time it takes to plug a cable and reach for
+/// a fader.
+const RESCAN: Duration = Duration::from_secs(1);
+
 pub struct MidiIn {
     rx: Receiver<MidiEvent>,
+    tx: Sender<MidiEvent>,
     pub ports: Vec<String>,
-    _conns: Vec<MidiInputConnection<Sender<MidiEvent>>>,
+    conns: Vec<MidiInputConnection<Sender<MidiEvent>>>,
+    last_scan: Instant,
 }
 
 impl MidiIn {
-    /// Connect to every available input port.
-    pub fn open() -> Result<Self, String> {
-        let scan = MidiInput::new("kitty-vj").map_err(|e| e.to_string())?;
-        let n_ports = scan.ports().len();
-        if n_ports == 0 {
-            return Err("no MIDI ports".into());
-        }
+    /// Start with whatever is plugged in — possibly nothing. A missing
+    /// controller is not a failure: it may be plugged in mid-set, and
+    /// the instrument has to survive both that and the cable being
+    /// kicked out again.
+    pub fn open() -> Self {
         let (tx, rx) = channel();
+        let mut me = Self {
+            rx,
+            tx,
+            ports: Vec::new(),
+            conns: Vec::new(),
+            last_scan: Instant::now() - RESCAN,
+        };
+        me.rescan();
+        me
+    }
+
+    /// Reconnect to whatever is present now. Called on a timer, so a
+    /// controller powered on after the app — the normal order, since
+    /// rekordbox usually claims it first — still lands.
+    pub fn rescan(&mut self) {
+        self.last_scan = Instant::now();
+        let Ok(scan) = MidiInput::new("kitty-vj-scan") else {
+            return;
+        };
+        let names: Vec<String> = scan
+            .ports()
+            .iter()
+            .map(|p| scan.port_name(p).unwrap_or_default())
+            .collect();
+        if names == self.ports && !self.conns.is_empty() {
+            return; // nothing came or went
+        }
+        // The set changed: drop every connection and take them all
+        // again. Reconnecting one port is not obviously cheaper than
+        // reconnecting four, and this way there is one code path.
+        self.conns.clear();
+        self.ports.clear();
+        let (conns, names) = Self::connect_all(&self.tx);
+        self.conns = conns;
+        self.ports = names;
+    }
+
+    /// True if a rescan is due. The caller drives this so the timer
+    /// lives on the render loop rather than in a thread.
+    pub fn due(&self) -> bool {
+        self.last_scan.elapsed() >= RESCAN
+    }
+
+    pub fn connected(&self) -> bool {
+        !self.conns.is_empty()
+    }
+
+    fn connect_all(
+        tx: &Sender<MidiEvent>,
+    ) -> (Vec<MidiInputConnection<Sender<MidiEvent>>>, Vec<String>) {
         let mut conns = Vec::new();
         let mut names = Vec::new();
-
+        let Ok(scan) = MidiInput::new("kitty-vj") else {
+            return (conns, names);
+        };
+        let n_ports = scan.ports().len();
         for i in 0..n_ports {
-            let input = MidiInput::new("kitty-vj").map_err(|e| e.to_string())?;
+            let Ok(input) = MidiInput::new("kitty-vj") else {
+                continue;
+            };
             let Some(port) = input.ports().into_iter().nth(i) else {
                 continue;
             };
@@ -78,14 +145,7 @@ impl MidiIn {
                 names.push(name);
             }
         }
-        if conns.is_empty() {
-            return Err("no MIDI port would open".into());
-        }
-        Ok(Self {
-            rx,
-            ports: names,
-            _conns: conns,
-        })
+        (conns, names)
     }
 
     pub fn drain(&self) -> Vec<MidiEvent> {
@@ -141,6 +201,26 @@ impl MidiClock {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn opening_with_nothing_plugged_in_is_not_a_failure() {
+        // A controller powered on after the app is the normal order —
+        // rekordbox usually claims it first — so a missing device must
+        // leave a working object that can pick it up later.
+        let m = MidiIn::open();
+        assert!(m.drain().is_empty());
+        // Whether anything is connected depends on the machine; what
+        // matters is that we got an object either way and can rescan.
+        let _ = m.connected();
+    }
+
+    #[test]
+    fn rescan_is_rate_limited() {
+        let mut m = MidiIn::open();
+        assert!(!m.due(), "a fresh scan should not immediately be due");
+        m.rescan();
+        assert!(!m.due());
+    }
 
     #[test]
     fn midi_clock_tempo_from_ticks() {

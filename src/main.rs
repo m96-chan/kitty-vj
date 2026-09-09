@@ -215,7 +215,7 @@ struct App {
     jogs: [jog::Jog; 4],
     jog_bind: [Option<(u8, u8)>; 4],
     jog_touch_bind: [Option<(u8, u8)>; 4],
-    midi: Option<midi::MidiIn>,
+    midi: midi::MidiIn,
     midi_clock: midi::MidiClock,
     midi_clock_sync: bool,
     cc_bind_int: Option<(u8, u8)>,
@@ -272,7 +272,7 @@ struct App {
 
 impl App {
     fn new(plates: Vec<assets::Plate>, text: String, lyrics: lyrics::Lyrics) -> Self {
-        let bindings = config::load(std::path::Path::new(config::PATH));
+        let bindings = config::load(&config::path());
         let plates = std::rc::Rc::new(plates);
         let mut effects: Vec<Box<dyn Effect>> = vec![
             Box::new(Pulse),
@@ -318,8 +318,9 @@ impl App {
             jogs: Default::default(),
             jog_bind: bindings.jogs,
             jog_touch_bind: bindings.jog_touch,
-            // MIDI needs no permission prompt — open at launch.
-            midi: midi::MidiIn::open().ok(),
+            // Opened at launch and rescanned on a timer, so a controller
+            // powered on later still lands.
+            midi: midi::MidiIn::open(),
             midi_clock: midi::MidiClock::new(),
             midi_clock_sync: false,
             cc_bind_int: bindings.intensity,
@@ -515,7 +516,7 @@ impl App {
                 self.triggers.press(n as usize - 1, self.clock.beat());
             }
             KeyCode::Char('m') => {
-                if self.midi.is_some() {
+                if self.midi.connected() {
                     // Cycle the learn target: off → int → ch1..ch4 → off.
                     self.learn = match self.learn {
                         LearnTarget::Off => LearnTarget::Intensity,
@@ -770,13 +771,17 @@ impl App {
                 .then(|| scfx::TYPES.iter().position(|t| *t == self.scfx_type))
                 .flatten(),
         };
-        let _ = config::save(std::path::Path::new(config::PATH), &b);
+        let _ = config::save(&config::path(), &b);
     }
 
     /// Drain MIDI: CC learn/binding, clock ticks, transport.
     fn process_midi(&mut self) {
-        let Some(m) = &self.midi else { return };
-        for ev in m.drain() {
+        // Look for controllers that appeared or vanished. Doing it here
+        // keeps the timer on the render loop instead of a thread.
+        if self.midi.due() {
+            self.midi.rescan();
+        }
+        for ev in self.midi.drain() {
             match ev {
                 midi::MidiEvent::Cc { ch, cc, val } => {
                     self.last_cc = Some((ch, cc, val));
@@ -1381,7 +1386,8 @@ impl App {
             (Some(_), false) => " │ ⇄ off".to_string(),
             (None, _) => String::new(),
         };
-        let mid = if let Some(m) = &self.midi {
+        let mid = if self.midi.connected() {
+            let m = &self.midi;
             let port: String = m
                 .ports
                 .first()
@@ -1417,7 +1423,9 @@ impl App {
             };
             format!(" │ M:{port}{cc}{note}{bind}{learn}{mclk}")
         } else {
-            String::new()
+            // Say so rather than going quiet: a controller that never
+            // arrived and one that was unplugged look the same on stage.
+            " │ M:none".to_string()
         };
         let hud_text = format!(
             " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p M w x b o h y k a C n r m c l q",

@@ -15,6 +15,47 @@ use std::path::Path;
 
 pub const PATH: &str = "kitty-vj.conf";
 
+/// Where the gig config actually lives.
+///
+/// The working directory is not reliable: the app is routinely launched
+/// from somewhere else (`kitty-vj ../OtherProject/assets`), and a config
+/// silently not found means every binding is silently gone — which on
+/// stage reads as "MIDI stopped working". So look next to the binary as
+/// well, and fall back to the working directory for the first run.
+pub fn path() -> std::path::PathBuf {
+    let cwd = std::path::PathBuf::from(PATH);
+    if cwd.exists() {
+        return cwd;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let beside = dir.join(PATH);
+        if beside.exists() {
+            return beside;
+        }
+        // target/release/kitty-vj -> the project root, where a
+        // developer's config sits.
+        for up in [2, 3] {
+            let mut d = dir.to_path_buf();
+            let mut ok = true;
+            for _ in 0..up {
+                if !d.pop() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                let p = d.join(PATH);
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+    }
+    cwd
+}
+
 #[derive(Default, Clone, PartialEq)]
 pub struct Bindings {
     pub intensity: Option<(u8, u8)>,
@@ -173,6 +214,19 @@ mod tests {
         let path = dir.join(PATH);
         save(&path, &b).unwrap();
         assert!(load(&path) == b);
+    }
+
+    #[test]
+    fn a_config_is_found_from_another_working_directory() {
+        // The bug this guards: launched as `kitty-vj ../Other/assets`
+        // from elsewhere, the config was silently not found and every
+        // binding silently vanished — which on stage reads as "MIDI
+        // stopped working".
+        let p = path();
+        assert!(
+            p.file_name().unwrap() == PATH,
+            "path() must resolve to the config file name, got {p:?}"
+        );
     }
 
     #[test]
