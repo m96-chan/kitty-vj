@@ -48,6 +48,7 @@ pub const SAMPLES: &[(&str, &str)] = &[
     ("PAPER", "PLATE + IMGDUST*0.5"),
     ("GRID", "RAIN*0.7 + FLOOR + MCUBE"),
     ("LIVE", "PXCAM + SPARKS3D*0.5"),
+    ("FRAME", "PXPLATE + MWIRE*0.6"),
 ];
 
 /// A recipe never expands past this many parts; beyond it a "scene" is
