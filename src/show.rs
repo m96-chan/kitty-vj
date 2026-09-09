@@ -168,6 +168,40 @@ impl ShowState {
     }
 }
 
+/// The Transform shape: the show's master exports are a per-cell colour
+/// transform like any look — the mono wash, the white hit and the master
+/// fade, in that order. `plate`, `particles`, `zoom`, `logo` and `hold`
+/// are not colours and are consumed elsewhere (or await consumers, which
+/// the app documents at its call sites rather than hiding here).
+impl crate::pass::ColorPass for ShowState {
+    fn name(&self) -> &'static str {
+        "SHOW"
+    }
+
+    fn amount(&self, _ctx: &crate::pass::CellCtx) -> f64 {
+        ((1.0 - self.fade) + self.mono + self.flash).clamp(0.0, 1.0)
+    }
+
+    fn map(&self, c: ratatui::style::Color, _ctx: &crate::pass::CellCtx) -> ratatui::style::Color {
+        let ratatui::style::Color::Rgb(r, g, b) = c else {
+            return c;
+        };
+        let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
+        if self.mono > 0.0 {
+            let l = crate::pass::luma(r, g, b);
+            r += (l - r) * self.mono;
+            g += (l - g) * self.mono;
+            b += (l - b) * self.mono;
+        }
+        if self.flash > 0.0 {
+            r += (255.0 - r) * self.flash;
+            g += (255.0 - g) * self.flash;
+            b += (255.0 - b) * self.flash;
+        }
+        crate::pass::rgb(r * self.fade, g * self.fade, b * self.fade)
+    }
+}
+
 impl Default for ShowState {
     fn default() -> Self {
         Self::neutral()

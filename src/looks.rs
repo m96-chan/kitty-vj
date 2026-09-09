@@ -6,7 +6,7 @@
 use ratatui::style::Color;
 
 use crate::drive::Drive;
-use crate::pass::{CellCtx, ColorPass, luma, rgb};
+use crate::pass::{CellCtx, ColorPass, contrast, hsv, hue_rotate, luma, rgb, saturate};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Look {
@@ -52,10 +52,6 @@ impl Look {
         let i = LOOKS.iter().position(|l| l == self).unwrap_or(0);
         LOOKS[(i + 1) % LOOKS.len()]
     }
-}
-
-fn contrast(v: f64, k: f64) -> f64 {
-    (v - 128.0) * k + 128.0
 }
 
 /// Apply a look to one colour. `hue_base` is the scene's random hue,
@@ -163,42 +159,6 @@ impl ColorPass for Look {
     fn map(&self, c: Color, ctx: &CellCtx) -> Color {
         apply(c, *self, ctx.drive, ctx.t, ctx.y, ctx.hue_base, ctx.accent)
     }
-}
-
-fn saturate((r, g, b): (f64, f64, f64), k: f64) -> (f64, f64, f64) {
-    let l = luma(r, g, b);
-    (l + (r - l) * k, l + (g - l) * k, l + (b - l) * k)
-}
-
-fn hue_rotate((r, g, b): (f64, f64, f64), deg: f64) -> (f64, f64, f64) {
-    let (s, co) = deg.to_radians().sin_cos();
-    (
-        r * (0.213 + co * 0.787 - s * 0.213)
-            + g * (0.715 - co * 0.715 - s * 0.715)
-            + b * (0.072 - co * 0.072 + s * 0.928),
-        r * (0.213 - co * 0.213 + s * 0.143)
-            + g * (0.715 + co * 0.285 + s * 0.140)
-            + b * (0.072 - co * 0.072 - s * 0.283),
-        r * (0.213 - co * 0.213 - s * 0.787)
-            + g * (0.715 - co * 0.715 + s * 0.715)
-            + b * (0.072 + co * 0.928 + s * 0.072),
-    )
-}
-
-fn hsv(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
-    let h = h.rem_euclid(1.0) * 6.0;
-    let i = h.floor() as i32;
-    let f = h - i as f64;
-    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
-    let (r, g, b) = match i.rem_euclid(6) {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        _ => (v, p, q),
-    };
-    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 #[cfg(test)]

@@ -11,6 +11,12 @@
 #[path = "../src/graphics.rs"]
 mod graphics;
 #[allow(dead_code)]
+#[path = "../src/drive.rs"]
+mod drive;
+#[allow(dead_code)]
+#[path = "../src/pass.rs"]
+mod pass;
+#[allow(dead_code)]
 #[path = "../src/pixfx.rs"]
 mod pixfx;
 #[allow(dead_code)]

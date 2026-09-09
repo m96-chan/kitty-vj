@@ -24,7 +24,7 @@
 
 use std::f64::consts::TAU;
 
-use crate::drive::Drive;
+use crate::drive::{Drive, SEC_PER_BEAT};
 use crate::graphics::Framebuffer;
 use crate::rng::{hash3, unit_f64};
 
@@ -40,11 +40,6 @@ use crate::raster::{CAM_Z, FOCAL_FRAC, NEAR};
 /// run; we cap it because a near point is otherwise a full-screen quad
 /// rasterised in scalar Rust.
 const MAX_POINT: f64 = 6.0;
-
-/// The original clocked on wall seconds. We clock on beats, with 120 BPM
-/// as the reference tempo, so drift and swirl stay tempo-locked instead
-/// of running away from the music.
-const SEC_PER_BEAT: f64 = 0.5;
 
 /// Point budgets. Density scales with framebuffer area — one point per
 /// this many pixels — and then hits a hard cap, because these run every

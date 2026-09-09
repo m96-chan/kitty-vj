@@ -3,6 +3,7 @@
 //! determinism contract holds here too.
 
 use crate::graphics::Framebuffer;
+use crate::pass::hsv;
 
 /// PLASMA — summed sine fields, palette-cycled on the beat. The canonical
 /// demoscene plasma, clocked.
@@ -71,24 +72,6 @@ pub fn starfield(fb: &mut Framebuffer, beat: f64, intensity: f64) {
         let lum = ((1.0 - z) * 255.0) as u8;
         fb.set(x as u32, y as u32, lum, lum, lum.max(180));
     }
-}
-
-fn hsv(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
-    let h = (h.rem_euclid(1.0)) * 6.0;
-    let i = h.floor() as i32;
-    let f = h - i as f64;
-    let p = v * (1.0 - s);
-    let q = v * (1.0 - s * f);
-    let t = v * (1.0 - s * (1.0 - f));
-    let (r, g, b) = match i.rem_euclid(6) {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        _ => (v, p, q),
-    };
-    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 #[cfg(test)]

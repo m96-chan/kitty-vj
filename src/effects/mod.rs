@@ -53,7 +53,7 @@ pub struct FrameCtx {
 impl FrameCtx {
     /// Beat time quantized to 1/16 beats — for groove-locked flicker.
     pub fn tick16(&self) -> u64 {
-        (self.beat.max(0.0) * 16.0) as u64
+        crate::pass::tick16(self.beat)
     }
 }
 

@@ -56,15 +56,17 @@ use crate::drive::Drive;
 #[derive(Clone, Copy)]
 pub struct CellCtx<'a> {
     pub drive: &'a Drive,
-    /// Visual clock in seconds.
+    /// Visual clock in seconds — wall time, frozen with the show.
     pub t: f64,
+    /// Beat time. Grid-locked passes (a strobe on eighths) read this;
+    /// clock-locked ones (a hue cycle per second) read `t`. Both are
+    /// carried because confusing them is exactly the units bug that
+    /// made the hue cycle tempo-dependent.
+    pub beat: f64,
     pub x: u16,
     pub y: u16,
     pub w: u16,
-    /// Global fader, [0,1]. Not every pass reads it — a look is a
-    /// scene decision, not a fader — but the ones ported from the hit
-    /// pool scale by it, so it belongs in the context.
-    #[allow(dead_code)]
+    /// Global fader, [0,1].
     pub intensity: f64,
     /// Per-scene random hue, degrees.
     pub hue_base: f64,
@@ -91,17 +93,91 @@ pub trait ColorPass {
 }
 
 /// Clamp and pack a float triple back into a terminal colour.
+///
+/// This is the one packer. Five modules had five conventions — round,
+/// truncate, clamp one end, clamp both, rely on the saturating cast —
+/// which means the same computed colour landed a unit apart depending on
+/// which module packed it. The decision here: round half-up, clamp both
+/// ends.
 pub fn rgb(r: f64, g: f64, b: f64) -> Color {
     Color::Rgb(
-        r.clamp(0.0, 255.0) as u8,
-        g.clamp(0.0, 255.0) as u8,
-        b.clamp(0.0, 255.0) as u8,
+        (r + 0.5).clamp(0.0, 255.0) as u8,
+        (g + 0.5).clamp(0.0, 255.0) as u8,
+        (b + 0.5).clamp(0.0, 255.0) as u8,
     )
 }
 
 /// Rec.601 luminance, the weighting every ported effect uses.
 pub fn luma(r: f64, g: f64, b: f64) -> f64 {
     0.299 * r + 0.587 * g + 0.114 * b
+}
+
+// ---------------------------------------------------------------------
+// The shared maths. Each of these existed as two to six private copies
+// across the ported modules, drifting in small ways (an unguarded
+// divide, a missing clamp, a different rounding). One definition each;
+// the ports' "the numbers match the original" claim is only checkable
+// when the arithmetic under the numbers is shared.
+
+/// HSV to RGB bytes. Two identical copies existed (looks, pixfx).
+pub fn hsv(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let i = h.floor() as i32;
+    let f = h - i as f64;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+}
+
+/// Luma-preserving hue rotation (Rec.601 matrix). Two identical
+/// nine-coefficient copies existed (looks, scfx).
+pub fn hue_rotate((r, g, b): (f64, f64, f64), deg: f64) -> (f64, f64, f64) {
+    let (s, co) = deg.to_radians().sin_cos();
+    (
+        r * (0.213 + co * 0.787 - s * 0.213)
+            + g * (0.715 - co * 0.715 - s * 0.715)
+            + b * (0.072 - co * 0.072 + s * 0.928),
+        r * (0.213 - co * 0.213 + s * 0.143)
+            + g * (0.715 + co * 0.285 + s * 0.140)
+            + b * (0.072 - co * 0.072 - s * 0.283),
+        r * (0.213 - co * 0.213 - s * 0.787)
+            + g * (0.715 - co * 0.715 + s * 0.715)
+            + b * (0.072 + co * 0.928 + s * 0.072),
+    )
+}
+
+/// Saturation about the luma axis.
+pub fn saturate((r, g, b): (f64, f64, f64), k: f64) -> (f64, f64, f64) {
+    let l = luma(r, g, b);
+    (l + (r - l) * k, l + (g - l) * k, l + (b - l) * k)
+}
+
+/// Contrast about mid-grey, in the 0-255 domain.
+pub fn contrast(v: f64, k: f64) -> f64 {
+    (v - 128.0) * k + 128.0
+}
+
+/// GLSL-style smoothstep, guarded: a degenerate edge pair steps rather
+/// than dividing by zero (one prior copy divided unguarded).
+pub fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
+    if e0 == e1 {
+        return if x < e0 { 0.0 } else { 1.0 };
+    }
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Beat time quantized to 16ths, for groove-locked flicker. Four copies
+/// existed; this is the definition FrameCtx::tick16 forwards to.
+pub fn tick16(beat: f64) -> u64 {
+    (beat.max(0.0) * 16.0) as u64
 }
 
 #[cfg(test)]
@@ -128,6 +204,7 @@ mod tests {
         CellCtx {
             drive: d,
             t: 0.0,
+            beat: 0.0,
             x: 0,
             y: 0,
             w: 80,

@@ -107,7 +107,7 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use crate::drive::Drive;
+use crate::drive::{Drive, SEC_PER_BEAT};
 use crate::graphics::Framebuffer;
 use crate::raster::{
     CAM_Z, Camera, DepthBuffer, DrawOpts, Mesh, Raster, Transform, Varyings, Vec3, Vertex, v3,
@@ -120,14 +120,9 @@ use crate::rng::{hash3, unit_f64};
 /// The caller applies it; it lives here because it belongs to the look.
 pub const PLATE_DIM: f64 = 0.40;
 
-/// Reference tempo, as in `pixparticles`: the rig is clocked on beats,
-/// and this is what turns them back into the seconds the original's
-/// decay constants and roll rate were written in.
-const SEC_PER_BEAT: f64 = 0.5;
-
-/// Mirrors `drive::TAU_BEAT`, which is private. The delayed rings replay
+/// The delayed rings replay
 /// that envelope, so if one moves, move both.
-const TAU_BEAT: f64 = 0.070;
+const TAU_BEAT: f64 = crate::drive::TAU_BEAT;
 
 /// The drive scalar's ceiling, straight from the original.
 const DRIVE_MAX: f64 = 1.6;

@@ -11,6 +11,7 @@
 //! per cell (seed-hashed, no per-frame reshuffle), so a transition
 //! accumulates cells instead of boiling them.
 
+use crate::pass::smoothstep;
 use crate::rng::{hash3, unit_f64};
 
 /// Two frames in, one out. Implementors decide, per cell, which side
@@ -64,11 +65,6 @@ pub trait Transition {
 }
 
 /// GLSL `smoothstep`, because the ported masks are written in its terms.
-fn smoothstep(e0: f64, e1: f64, x: f64) -> f64 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// Per-cell hash threshold — the terminal-native crossfade. Where the
 /// original could ramp alpha, a grid dissolves.
 pub struct Fade;

@@ -665,6 +665,41 @@ impl App {
         }
     }
 
+    /// Run one colour pass over the whole stage. This is the mechanism
+    /// every frame-wide recolour goes through — the beat hits, the show
+    /// gate — so a fourth one is an impl of ColorPass, not another loop.
+    /// `amount` is probed once: these passes are position-independent by
+    /// contract, and a zero frame costs a single call.
+    fn apply_over_stage(
+        &self,
+        buf: &mut ratatui::buffer::Buffer,
+        stage: ratatui::layout::Rect,
+        vbeat: f64,
+        pass_: &dyn ColorPass,
+    ) {
+        let probe = pass::CellCtx {
+            drive: &self.drive,
+            t: self.vt,
+            beat: vbeat,
+            x: 0,
+            y: 0,
+            w: stage.width,
+            intensity: self.intensity,
+            hue_base: self.hue_base,
+            accent: self.accent,
+        };
+        if pass_.amount(&probe) < 0.005 {
+            return;
+        }
+        for y in 0..stage.height {
+            for x in 0..stage.width {
+                let cctx = pass::CellCtx { x, y, ..probe };
+                let cell = &mut buf[(stage.x + x, stage.y + y)];
+                pass_.apply(cell, &cctx);
+            }
+        }
+    }
+
     /// The display name of a unit, whichever medium it is.
     fn unit_name(&self, u: units::Unit) -> &'static str {
         self.unit_list
@@ -1172,6 +1207,7 @@ impl App {
                         let cctx = pass::CellCtx {
                             drive: &self.drive,
                             t: self.vt,
+                            beat: vbeat,
                             x,
                             y,
                             w: stage.width,
@@ -1299,34 +1335,20 @@ impl App {
             }
         }
 
-        // The show's exports gate the picture: master fade, the mono
-        // wash of standby, and its one-shot white hits.
+        // The show's exports gate the picture — the same Transform shape
+        // as everything else that recolours the frame.
         let sh = self.show_state;
-        if sh.fade < 0.999 || sh.mono > 0.001 || sh.flash > 0.001 {
-            for y in 0..stage.height {
-                for x in 0..stage.width {
-                    let cell = &mut frame.buffer_mut()[(stage.x + x, stage.y + y)];
-                    cell.fg = show_gate(cell.fg, &sh);
-                    cell.bg = show_gate(cell.bg, &sh);
-                }
-            }
-        }
+        self.apply_over_stage(frame.buffer_mut(), stage, vbeat, &sh);
         // Only the hits this scene drew are live — that is what makes
-        // one scene read differently from the next.
+        // one scene read differently from the next. Same trait as the
+        // looks and SCFX: a colour in, a colour out.
         let sc = self.scenes.scene();
-        triggers::beat_hits(
-            frame.buffer_mut(),
-            stage,
-            &self.drive,
-            vbeat,
-            self.intensity,
-            self.accent,
-            triggers::HitSet {
-                invert: sc.has_hit(scene::Hit::InvertFlash),
-                color: sc.has_hit(scene::Hit::ColorFlash),
-                strobe: sc.has_hit(scene::Hit::Strobe),
-            },
-        );
+        let hits = triggers::HitSet {
+            invert: sc.has_hit(scene::Hit::InvertFlash),
+            color: sc.has_hit(scene::Hit::ColorFlash),
+            strobe: sc.has_hit(scene::Hit::Strobe),
+        };
+        self.apply_over_stage(frame.buffer_mut(), stage, vbeat, &hits);
         self.triggers.post(frame.buffer_mut(), stage, vbeat);
         self.render_lyrics(frame.buffer_mut(), stage, &ctx);
         self.overlay.render(frame.buffer_mut(), stage, &ctx);
@@ -1354,6 +1376,7 @@ impl App {
             let probe = pass::CellCtx {
                 drive: &self.drive,
                 t: self.vt,
+                beat,
                 x: 0,
                 y: 0,
                 w: stage.width,
@@ -1528,27 +1551,6 @@ impl App {
             hud,
         );
     }
-}
-
-/// Apply the show sequence's master exports to one colour: the mono
-/// wash, the white hit and the master fade, in that order. Kept as a
-/// free function because it is a Transform and reads nothing but the
-/// exports it is handed.
-fn show_gate(c: Color, sh: &show::ShowState) -> Color {
-    let Color::Rgb(r, g, b) = c else { return c };
-    let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
-    if sh.mono > 0.0 {
-        let l = pass::luma(r, g, b);
-        r += (l - r) * sh.mono;
-        g += (l - g) * sh.mono;
-        b += (l - b) * sh.mono;
-    }
-    if sh.flash > 0.0 {
-        r += (255.0 - r) * sh.flash;
-        g += (255.0 - g) * sh.flash;
-        b += (255.0 - b) * sh.flash;
-    }
-    pass::rgb(r * sh.fade, g * sh.fade, b * sh.fade)
 }
 
 /// Kills the caffeinate child when the app exits.

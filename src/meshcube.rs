@@ -72,7 +72,7 @@ use std::sync::OnceLock;
 use image::RgbImage;
 
 use crate::assets::Plate;
-use crate::drive::Drive;
+use crate::drive::{Drive, SEC_PER_BEAT};
 use crate::graphics::Framebuffer;
 use crate::raster::{
     Camera, Cull, DepthBuffer, DrawOpts, LineSegments, Raster, Transform, Varyings, Vec3, Vertex,
@@ -91,10 +91,6 @@ const SIZE: f64 = 320.0;
 /// Where the cube sits down −Z, and how far the kick shoves it away.
 const BASE_Z: f64 = -360.0;
 const THUMP_Z: f64 = 80.0;
-
-/// Reference tempo, as in [`crate::pixparticles`]: the original clocked
-/// on wall seconds, we clock on beats and convert here.
-const SEC_PER_BEAT: f64 = 0.5;
 
 /// The original's spin floor, radians a second.
 const SPIN_BASE: f64 = 0.55;

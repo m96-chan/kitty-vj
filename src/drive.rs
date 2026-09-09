@@ -6,11 +6,18 @@
 //! onset flinch live here, derived from the clock when running dry and
 //! from the audio analyser when A-mode is on.
 
-/// Decay constants, seconds. Straight from the original.
-const TAU_BEAT: f64 = 0.070;
-const TAU_BAR: f64 = 0.130;
+/// Decay constants, seconds. Straight from the original. Public because
+/// the mesh ports integrate these pulses in closed form and need the
+/// same taus — a re-declared copy is how the angular budgets drift.
+pub const TAU_BEAT: f64 = 0.070;
+pub const TAU_BAR: f64 = 0.130;
 const TAU_PHRASE: f64 = 0.060;
 const TAU_HIT: f64 = 0.048;
+
+/// Seconds per beat at the 120 BPM reference the ports convert their
+/// wall-clock constants against. Four modules kept private copies, each
+/// commenting about the others.
+pub const SEC_PER_BEAT: f64 = 0.5;
 
 #[derive(Clone, Copy, Default)]
 pub struct Drive {

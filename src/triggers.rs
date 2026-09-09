@@ -6,8 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use crate::drive::Drive;
-use crate::pass::rgb;
+use crate::pass::{CellCtx, ColorPass, rgb};
 
 pub const PADS: usize = 8;
 pub const PAD_NAMES: [&str; PADS] = [
@@ -34,11 +33,9 @@ pub struct Triggers {
 
 fn scale(c: Color, k: f64) -> Color {
     match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            (r as f64 * k).min(255.0) as u8,
-            (g as f64 * k).min(255.0) as u8,
-            (b as f64 * k).min(255.0) as u8,
-        ),
+        // Through the shared packer: five modules had five packing
+        // conventions, and this one had no lower clamp at all.
+        Color::Rgb(r, g, b) => rgb(r as f64 * k, g as f64 * k, b as f64 * k),
         other => other,
     }
 }
@@ -58,61 +55,63 @@ pub struct HitSet {
     pub strobe: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn beat_hits(
-    buf: &mut Buffer,
-    area: Rect,
-    d: &Drive,
-    beat: f64,
-    intensity: f64,
-    accent: (u8, u8, u8),
-    set: HitSet,
-) {
-    let invert = set.invert && d.gbeat() > 0.72;
-    let flash = if set.color {
-        0.35 * d.gbar() * intensity
-    } else {
-        0.0
-    };
-    // First 14% of each eighth, as over there.
-    let eighth = (beat * 2.0).rem_euclid(1.0);
-    let strobe = if set.strobe && eighth < 0.14 {
-        (0.10 + 0.22 * intensity) * intensity
-    } else {
-        0.0
-    };
-    if !invert && flash < 0.01 && strobe < 0.01 {
-        return;
-    }
-    for y in 0..area.height {
-        for x in 0..area.width {
-            let cell = &mut buf[(area.x + x, area.y + y)];
-            cell.fg = hit_colour(cell.fg, invert, flash, strobe, accent);
-            cell.bg = hit_colour(cell.bg, invert, flash, strobe, accent);
-        }
+impl HitSet {
+    /// The three momentary amounts, resolved once per frame from the
+    /// drive and the grid. Position-independent, which is what lets a
+    /// caller probe `amount` at one cell and skip the frame.
+    fn gates(&self, ctx: &CellCtx) -> (bool, f64, f64) {
+        let invert = self.invert && ctx.drive.gbeat() > 0.72;
+        let flash = if self.color {
+            0.35 * ctx.drive.gbar() * ctx.intensity
+        } else {
+            0.0
+        };
+        // First 14% of each eighth, as over there.
+        let eighth = (ctx.beat * 2.0).rem_euclid(1.0);
+        let strobe = if self.strobe && eighth < 0.14 {
+            (0.10 + 0.22 * ctx.intensity) * ctx.intensity
+        } else {
+            0.0
+        };
+        (invert, flash, strobe)
     }
 }
 
-fn hit_colour(c: Color, invert: bool, flash: f64, strobe: f64, accent: (u8, u8, u8)) -> Color {
-    let Color::Rgb(r, g, b) = c else { return c };
-    let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
-    if invert {
-        r = 255.0 - r;
-        g = 255.0 - g;
-        b = 255.0 - b;
+/// The Transform shape. pass.rs said from the start that the beat hits
+/// were the same function as a look and an SCFX pass wearing another
+/// name; this is where they finally wear the same trait.
+impl ColorPass for HitSet {
+    fn name(&self) -> &'static str {
+        "HITS"
     }
-    if flash > 0.0 {
-        // Additive accent, the `lighter` composite over there.
-        r += accent.0 as f64 * flash;
-        g += accent.1 as f64 * flash;
-        b += accent.2 as f64 * flash;
+
+    fn amount(&self, ctx: &CellCtx) -> f64 {
+        let (invert, flash, strobe) = self.gates(ctx);
+        if invert { 1.0 } else { flash.max(strobe) }
     }
-    if strobe > 0.0 {
-        r += 255.0 * strobe;
-        g += 255.0 * strobe;
-        b += 255.0 * strobe;
+
+    fn map(&self, c: Color, ctx: &CellCtx) -> Color {
+        let (invert, flash, strobe) = self.gates(ctx);
+        let Color::Rgb(r, g, b) = c else { return c };
+        let (mut r, mut g, mut b) = (r as f64, g as f64, b as f64);
+        if invert {
+            r = 255.0 - r;
+            g = 255.0 - g;
+            b = 255.0 - b;
+        }
+        if flash > 0.0 {
+            // Additive accent, the `lighter` composite over there.
+            r += ctx.accent.0 as f64 * flash;
+            g += ctx.accent.1 as f64 * flash;
+            b += ctx.accent.2 as f64 * flash;
+        }
+        if strobe > 0.0 {
+            r += 255.0 * strobe;
+            g += 255.0 * strobe;
+            b += 255.0 * strobe;
+        }
+        rgb(r, g, b)
     }
-    rgb(r, g, b)
 }
 
 fn blank(buf: &Buffer, x: u16, y: u16) -> bool {
@@ -168,7 +167,7 @@ impl Triggers {
 
     /// Post-passes over the composited mix, in fixed order.
     pub fn post(&mut self, buf: &mut Buffer, area: Rect, beat: f64) {
-        let tick16 = (beat.max(0.0) * 16.0) as u64;
+        let tick16 = crate::pass::tick16(beat);
 
         // ROLL — freeze the frame, re-trigger flicker on 16ths.
         if self.active[ROLL] {

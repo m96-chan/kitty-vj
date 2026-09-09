@@ -81,7 +81,7 @@ pub fn slice(buf: &mut Buffer, area: Rect, beat: f64, gslice: f64, intensity: f6
     if gslice <= EPS || intensity <= EPS || area.width < 2 || area.height == 0 {
         return;
     }
-    let tick = (beat.max(0.0) * 16.0) as u64;
+    let tick = crate::pass::tick16(beat);
     let bands = 5 + (unit_f64(hash3(tick, 1, 0)) * 7.0) as u64;
     let src = buf.clone();
     for i in 0..bands {

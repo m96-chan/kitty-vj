@@ -5,7 +5,7 @@
 
 use ratatui::style::Color;
 
-use crate::pass::{CellCtx, ColorPass};
+use crate::pass::{CellCtx, ColorPass, hue_rotate, rgb, tick16};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ScfxType {
@@ -47,44 +47,9 @@ impl ScfxType {
 
 fn map3(c: Color, f: impl Fn(f64) -> f64) -> Color {
     match c {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            f(r as f64).clamp(0.0, 255.0) as u8,
-            f(g as f64).clamp(0.0, 255.0) as u8,
-            f(b as f64).clamp(0.0, 255.0) as u8,
-        ),
+        Color::Rgb(r, g, b) => rgb(f(r as f64), f(g as f64), f(b as f64)),
         other => other,
     }
-}
-
-/// Rotate a color's hue by `deg` degrees, leaving luminance and
-/// saturation alone. Luminance-preserving RGB rotation matrix.
-fn hue_rotate(c: Color, deg: f64) -> Color {
-    let Color::Rgb(r, g, b) = c else { return c };
-    let (r, g, b) = (r as f64, g as f64, b as f64);
-    let (s, co) = deg.to_radians().sin_cos();
-    // Constants from the standard luma-preserving hue matrix (Rec.601).
-    let m = [
-        [
-            0.213 + co * 0.787 - s * 0.213,
-            0.715 - co * 0.715 - s * 0.715,
-            0.072 - co * 0.072 + s * 0.928,
-        ],
-        [
-            0.213 - co * 0.213 + s * 0.143,
-            0.715 + co * 0.285 + s * 0.140,
-            0.072 - co * 0.072 - s * 0.283,
-        ],
-        [
-            0.213 - co * 0.213 - s * 0.787,
-            0.715 - co * 0.715 + s * 0.715,
-            0.072 + co * 0.928 + s * 0.072,
-        ],
-    ];
-    Color::Rgb(
-        (r * m[0][0] + g * m[0][1] + b * m[0][2]).clamp(0.0, 255.0) as u8,
-        (r * m[1][0] + g * m[1][1] + b * m[1][2]).clamp(0.0, 255.0) as u8,
-        (r * m[2][0] + g * m[2][1] + b * m[2][2]).clamp(0.0, 255.0) as u8,
-    )
 }
 
 fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16) -> Color {
@@ -98,7 +63,13 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16
         ScfxType::Filter => {
             // Hue wheel: the knob offset is a held rotation, full turn
             // either way sweeping the whole spectrum. Center = original.
-            hue_rotate(c, a * 180.0)
+            match c {
+                Color::Rgb(r, g, b) => {
+                    let (rr, gg, bb) = hue_rotate((r as f64, g as f64, b as f64), a * 180.0);
+                    rgb(rr, gg, bb)
+                }
+                other => other,
+            }
         }
         ScfxType::Crush => {
             let levels = (7.0 - amt * 5.0).max(2.0);
@@ -123,11 +94,7 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16
                         g * (1.0 - roll) + r * roll,
                         b * (1.0 - roll) + g * roll,
                     );
-                    Color::Rgb(
-                        r2.clamp(0.0, 255.0) as u8,
-                        g2.clamp(0.0, 255.0) as u8,
-                        b2.clamp(0.0, 255.0) as u8,
-                    )
+                    rgb(r2, g2, b2)
                 }
                 other => other,
             }
@@ -141,7 +108,7 @@ fn transform(c: Color, t: ScfxType, knob: f64, beat: f64, x: u16, y: u16, w: u16
         }
         ScfxType::Noise => {
             // Static: per-cell brightness jitter, gray speckle at the top.
-            let tick = (beat.max(0.0) * 16.0) as u64;
+            let tick = tick16(beat);
             let n = crate::rng::unit_f64(crate::rng::hash3(x as u64, y as u64, tick ^ 0xcafe));
             if n > 1.0 - amt * 0.25 {
                 Color::Rgb(200, 200, 200)

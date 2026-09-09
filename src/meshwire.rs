@@ -109,16 +109,11 @@
 use std::f64::consts::TAU;
 use std::sync::OnceLock;
 
-use crate::drive::Drive;
+use crate::drive::{Drive, SEC_PER_BEAT};
 use crate::graphics::Framebuffer;
 use crate::raster::{
     Camera, DepthBuffer, DrawOpts, Mesh, NEAR, Raster, Rot, Transform, Varyings, Vec3, Vertex, v3,
 };
-
-/// The reference tempo the ported scenes clock against, matching
-/// [`crate::pixparticles`]: the originals ran on wall seconds, we run on
-/// beats, and this is the exchange rate.
-const SEC_PER_BEAT: f64 = 0.5;
 
 /// The original's `BLAST_LIFE`, 1.5 s, in beats.
 const BLAST_LIFE: f64 = 1.5 / SEC_PER_BEAT;
@@ -205,8 +200,10 @@ fn spin_phase(beat: f64) -> f64 {
         return 0.0;
     }
     // Decay constants from `drive`, expressed in beats.
-    const TAU_BEAT: f64 = 0.070 / SEC_PER_BEAT;
-    const TAU_BAR: f64 = 0.130 / SEC_PER_BEAT;
+    // Drive's decay taus, converted from seconds to beats — derived
+    // from the shared constants so the angular budget cannot drift.
+    const TAU_BEAT: f64 = crate::drive::TAU_BEAT / SEC_PER_BEAT;
+    const TAU_BAR: f64 = crate::drive::TAU_BAR / SEC_PER_BEAT;
     let base = 0.45 * beat * SEC_PER_BEAT;
     let bar = 2.4 * SEC_PER_BEAT * pulse_integral(beat, 4.0, TAU_BAR);
     let pulse = 1.6 * SEC_PER_BEAT * pulse_integral(beat, 1.0, TAU_BEAT);
@@ -541,16 +538,10 @@ fn area2(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
     (b.1 - a.1) * (c.0 - a.0) - (b.0 - a.0) * (c.1 - a.1)
 }
 
-/// `smoothstep(0, 1, x)` with the clamping GLSL does.
+/// `smoothstep(0, 1, x)` — forwards to the shared guarded helper.
 #[inline]
 fn smoothstep01(x: f64) -> f64 {
-    if x.is_nan() || x <= 0.0 {
-        return 0.0;
-    }
-    if x >= 1.0 {
-        return 1.0;
-    }
-    x * x * (3.0 - 2.0 * x)
+    crate::pass::smoothstep(0.0, 1.0, x)
 }
 
 #[inline]
