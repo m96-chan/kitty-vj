@@ -23,6 +23,7 @@ mod pixfx;
 mod pixparticles;
 mod pixpost;
 mod postfx;
+mod prolink;
 mod raster;
 mod rng;
 mod scene;
@@ -209,6 +210,10 @@ struct App {
     last_cc: Option<(u8, u8, u8)>,
     link: Option<link::LinkSync>,
     link_sync: bool,
+    /// Pro DJ Link — the XDJ-XZ's own network, listened to passively.
+    prolink: Option<prolink::ProLink>,
+    prolink_sync: bool,
+    prolink_err: Option<String>,
     /// Everything a channel can hold, cells and pixels in one list.
     unit_list: Vec<(&'static str, units::Unit)>,
     /// Four mixer channels, composited bottom (1) to top (4).
@@ -323,6 +328,9 @@ impl App {
             last_cc: None,
             link: None,
             link_sync: false,
+            prolink: None,
+            prolink_sync: false,
+            prolink_err: None,
             unit_list,
             channels: std::array::from_fn(|i| Channel {
                 slot: units::Unit::Cell(i),
@@ -491,6 +499,7 @@ impl App {
                 if self.audio_sync {
                     self.link_sync = false;
                     self.midi_clock_sync = false;
+                    self.prolink_sync = false;
                 }
             }
             KeyCode::Char('b') => {
@@ -522,6 +531,7 @@ impl App {
                 if self.midi_clock_sync {
                     self.link_sync = false;
                     self.audio_sync = false;
+                    self.prolink_sync = false;
                 }
             }
             KeyCode::Char('l') => {
@@ -532,6 +542,29 @@ impl App {
                     self.link_sync = !self.link_sync;
                 }
                 if self.link_sync {
+                    self.audio_sync = false;
+                    self.midi_clock_sync = false;
+                    self.prolink_sync = false;
+                }
+            }
+            KeyCode::Char('j') => {
+                // Pro DJ Link (XDJ). First press binds the ports; after
+                // that it toggles. A bind failure (usually rekordbox
+                // squatting 50000/50001) lands in the HUD, not a panic.
+                if self.prolink.is_none() {
+                    match prolink::ProLink::start() {
+                        Ok(p) => {
+                            self.prolink = Some(p);
+                            self.prolink_sync = true;
+                            self.prolink_err = None;
+                        }
+                        Err(e) => self.prolink_err = Some(e),
+                    }
+                } else {
+                    self.prolink_sync = !self.prolink_sync;
+                }
+                if self.prolink_sync {
+                    self.link_sync = false;
                     self.audio_sync = false;
                     self.midi_clock_sync = false;
                 }
@@ -1091,10 +1124,31 @@ impl App {
         }
     }
 
-    /// External sync, one source at a time (Link > audio > MIDI clock),
-    /// always as a pull on the internal clock — never a replacement, so
-    /// the instrument keeps playing when a source dies.
+    /// External sync, one source at a time (Pro DJ Link > Link > audio >
+    /// MIDI clock), always as a pull on the internal clock — never a
+    /// replacement, so the instrument keeps playing when a source dies.
     fn sync(&mut self) {
+        if self.prolink_sync {
+            let Some(p) = &self.prolink else { return };
+            // Beat packets arrive ON the beat, so the arrival instant is
+            // the beat instant and the packet says which beat of the bar
+            // it was. A stale beat (deck paused, track ended) pulls
+            // nothing — the internal clock free-runs at the last tempo.
+            let Some((ev, at, _)) = p.beat() else { return };
+            let age = at.elapsed().as_secs_f64();
+            if age > 4.0 {
+                return;
+            }
+            let t = self.clock.tempo();
+            self.clock.set_tempo(t + (ev.bpm - t) * 0.2);
+
+            let period = 60.0 / self.clock.tempo();
+            let target = (ev.beat_in_bar - 1) as f64 + age / period;
+            let mut err = target.rem_euclid(4.0) - self.clock.phase(4.0);
+            err -= (err / 4.0).round() * 4.0;
+            self.clock.nudge_beats(err * 0.2);
+            return;
+        }
         if self.link_sync {
             if let Some(l) = &mut self.link {
                 let (tempo, link_beat) = l.capture();
@@ -1668,6 +1722,36 @@ impl App {
         } else {
             String::new()
         };
+        let pdj = if let Some(e) = &self.prolink_err {
+            format!(" │ PDJ! {e}")
+        } else if let Some(p) = &self.prolink {
+            if !self.prolink_sync {
+                " │ ◆PDJ off".to_string()
+            } else {
+                // One name (the XZ presents three numbers under one
+                // name), then followed deck, tempo, beat age — enough to
+                // see whether it is heard and whether beats went stale.
+                let devs = p.devices();
+                let who = devs
+                    .first()
+                    .map(|d| {
+                        let n: String = d.name.chars().take(8).collect();
+                        format!("{n}×{}", devs.len())
+                    })
+                    .unwrap_or_else(|| "0dev".into());
+                match p.beat() {
+                    Some((ev, at, _)) => format!(
+                        " │ ◆PDJ {who} D{} {:>5.1} {:.1}s",
+                        ev.device,
+                        ev.bpm,
+                        at.elapsed().as_secs_f64()
+                    ),
+                    None => format!(" │ ◆PDJ {who} ..."),
+                }
+            }
+        } else {
+            String::new()
+        };
         let lnk = match (&self.link, self.link_sync) {
             (Some(l), true) => format!(" │ ⇄Link {}p", l.peers()),
             (Some(_), false) => " │ ⇄ off".to_string(),
@@ -1715,7 +1799,7 @@ impl App {
             " │ M:none".to_string()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l j q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -1729,6 +1813,7 @@ impl App {
             },
             aud,
             cam,
+            pdj,
             lnk,
             mid,
             self.ai.hud(),
