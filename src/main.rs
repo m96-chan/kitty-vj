@@ -31,6 +31,7 @@ mod show;
 mod source;
 mod transition;
 mod triggers;
+mod units;
 
 use std::time::{Duration, Instant};
 
@@ -58,7 +59,7 @@ enum LearnTarget {
 
 /// A mixer channel: an effect slot, a vertical fader, and a COLOR knob.
 struct Channel {
-    slot: usize,
+    slot: units::Unit,
     level: f64,
     cc: Option<(u8, u8)>,
     /// Sound Color FX knob, 0..1, 0.5 = neutral.
@@ -68,56 +69,24 @@ struct Channel {
 
 const CHANNELS: usize = 4;
 
-/// Pixel effects available in the graphics tier, with display names.
-/// The first three are the originals; the rest are the ported particle
-/// modes, which accumulate additively and so clear the frame first.
-type PixFn = fn(&mut graphics::Framebuffer, f64, f64);
-const PIX_FX: [(&str, PixFn); 3] = [
-    ("PLASMA", pixfx::plasma),
-    ("TUNNEL", pixfx::tunnel),
-    ("STARS", pixfx::starfield),
-];
+/// Every playable unit, cells and pixels alike, in the order the digit
+/// keys and TAB walk them. Built at startup because how many cell
+/// effects exist depends on whether there are plates.
+fn build_unit_list(n_cell: usize, cell_names: &[&'static str]) -> Vec<(&'static str, units::Unit)> {
+    let mut v: Vec<(&'static str, units::Unit)> = (0..n_cell)
+        .map(|i| (cell_names[i], units::Unit::Cell(i)))
+        .collect();
+    v.extend(
+        units::PIX_UNITS
+            .iter()
+            .map(|(n, p)| (*n, units::Unit::Pixel(*p))),
+    );
+    v
+}
 
 /// What feeds the pixel tier. A generated field is a function of beat;
 /// an image source is a function of position, and `source.rs` draws
 /// those for both tiers so the camera cannot drift between them.
-#[derive(Clone, Copy, PartialEq)]
-enum PixSource {
-    Generated(usize),
-    Cam,
-    Plate,
-}
-
-impl PixSource {
-    fn name(&self) -> &'static str {
-        match self {
-            PixSource::Generated(i) => PIX_FX[*i].0,
-            PixSource::Cam => "CAM",
-            PixSource::Plate => "PLATE",
-        }
-    }
-
-    /// Cycle generators, then the two image sources.
-    fn next(&self) -> PixSource {
-        match self {
-            PixSource::Generated(i) if i + 1 < PIX_FX.len() => PixSource::Generated(i + 1),
-            PixSource::Generated(_) => PixSource::Cam,
-            PixSource::Cam => PixSource::Plate,
-            PixSource::Plate => PixSource::Generated(0),
-        }
-    }
-}
-
-/// Ported particle modes. They take the drive signals and composite
-/// additively, so they get their own table and their own call shape.
-type PartFn = fn(&mut graphics::Framebuffer, f64, f64, &drive::Drive, (u8, u8, u8), (u8, u8, u8));
-const PIX_PARTICLES: [(&str, PartFn); 4] = [
-    ("SPARKS", pixparticles::sparks),
-    ("PXTUNNEL", pixparticles::tunnel_px),
-    ("FLOOR", pixparticles::grid_floor),
-    ("RINGS", pixparticles::rings),
-];
-
 /// Cell-grid post passes from the ported set, cycled with '\''.
 #[derive(Clone, Copy, PartialEq)]
 enum CellPost {
@@ -141,37 +110,6 @@ const CELL_POSTS: [(&str, CellPost); 8] = [
     ("ZPUNCH", CellPost::ZoomPunch),
     ("SHAKE", CellPost::Shake),
 ];
-
-/// The three mesh modes. They rasterise solid or wire geometry with a
-/// depth buffer, which neither the particle nor the post tables can
-/// express, so they carry their own shape — and their own plate dim,
-/// since solid geometry has to carry the frame.
-#[derive(Clone, Copy, PartialEq)]
-enum MeshMode {
-    None,
-    Cube,
-    Wire,
-    Speaker,
-}
-
-const MESH_MODES: [(&str, MeshMode); 4] = [
-    ("-", MeshMode::None),
-    ("MCUBE", MeshMode::Cube),
-    ("MWIRE", MeshMode::Wire),
-    ("MSPKR", MeshMode::Speaker),
-];
-
-impl MeshMode {
-    /// How far the plate behind ducks so the geometry reads.
-    fn plate_dim(&self) -> f64 {
-        match self {
-            MeshMode::None => 1.0,
-            MeshMode::Cube => meshcube::PLATE_DIM,
-            MeshMode::Wire => 1.0, // additive glow, nothing to duck behind
-            MeshMode::Speaker => meshspeaker::PLATE_DIM,
-        }
-    }
-}
 
 /// Pixel post chain entries, cycled with 'P'.
 #[derive(Clone, Copy, PartialEq)]
@@ -260,6 +198,8 @@ struct App {
     last_cc: Option<(u8, u8, u8)>,
     link: Option<link::LinkSync>,
     link_sync: bool,
+    /// Everything a channel can hold, cells and pixels in one list.
+    unit_list: Vec<(&'static str, units::Unit)>,
     /// Four mixer channels, composited bottom (1) to top (4).
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
@@ -273,15 +213,12 @@ struct App {
     pad_learn: Option<usize>,
     last_note: Option<(u8, u8)>,
     scratch: Vec<ratatui::buffer::Buffer>,
-    /// Graphics tier: full-pixel rendering over the kitty protocol.
-    gfx: bool,
+    /// Scratch for blending one pixel unit over the picture below it.
+    scratch_fb: graphics::Framebuffer,
     gfx_fb: graphics::Framebuffer,
     /// Which pixel effect (index into PIX_FX) when in graphics mode.
-    pix: PixSource,
     /// Which plate the pixel tier shows when PLATE is its source.
     pix_plate: usize,
-    /// Which ported particle mode is stacked on top; None = off.
-    part: Option<usize>,
     /// Post pass over the pixel frame.
     pix_post: usize,
     /// Live capture, shared with the CAM effect. Opened on demand: a
@@ -293,9 +230,8 @@ struct App {
     /// Plates, shared with the effects that sample them — the mesh cube
     /// textures its faces from the same rotation.
     plates: std::rc::Rc<Vec<assets::Plate>>,
-    /// Mesh mode and the depth buffer it rasterises into, reused across
-    /// frames so a mode change costs no allocation.
-    mesh: usize,
+    /// Depth buffer for the mesh units, reused across frames so a
+    /// channel change costs no allocation.
     depth: raster::DepthBuffer,
     feedback: pixpost::Feedback,
     /// Cell-grid post pass from the ported set.
@@ -331,6 +267,8 @@ impl App {
         let cap_shared: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         effects.push(Box::new(CamFx::new(cap_shared.clone())));
+        let cell_names: Vec<&'static str> = effects.iter().map(|e| e.name()).collect();
+        let unit_list = build_unit_list(effects.len(), &cell_names);
         Self {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
@@ -368,8 +306,9 @@ impl App {
             last_cc: None,
             link: None,
             link_sync: false,
+            unit_list,
             channels: std::array::from_fn(|i| Channel {
-                slot: i,
+                slot: units::Unit::Cell(i),
                 level: if i == 0 { 1.0 } else { 0.0 },
                 cc: bindings.channels[i],
                 color: 0.5,
@@ -387,17 +326,14 @@ impl App {
             pad_learn: None,
             last_note: None,
             scratch: Vec::new(),
-            gfx: false,
+            scratch_fb: graphics::Framebuffer::new(1, 1),
             gfx_fb: graphics::Framebuffer::new(1, 1),
-            pix: PixSource::Generated(0),
             pix_plate: 0,
-            part: None,
             pix_post: 0,
             capture: cap_shared,
             capture_err: None,
             motion_drive: false,
             plates: plates_shared,
-            mesh: 0,
             depth: raster::DepthBuffer::new(1, 1),
             feedback: pixpost::Feedback::new(1, 1),
             cell_post: 0,
@@ -431,6 +367,11 @@ impl App {
                 ch.level = (ch.level + 0.05).min(1.0);
             }
             KeyCode::Tab => self.focus = (self.focus + 1) % CHANNELS,
+            // Digits reach the first nine units; these walk the whole
+            // list, which is the only way to reach the pixel ones now
+            // that both media share it.
+            KeyCode::Char('.') => self.step_unit(1),
+            KeyCode::Char(',') => self.step_unit(-1),
             KeyCode::Char('o') => self.overlay.toggle(),
             KeyCode::Char('h') => self.hud_visible = !self.hud_visible,
             KeyCode::Char('S') => self.scenes.request(scene::ChangeReason::Manual),
@@ -486,18 +427,7 @@ impl App {
             }
             KeyCode::Char('[') => self.lyrics.nudge(-0.25),
             KeyCode::Char(']') => self.lyrics.nudge(0.25),
-            KeyCode::Char('g') => self.gfx = !self.gfx,
-            KeyCode::Char('p') => self.pix = self.pix.next(),
             KeyCode::Char('P') => self.pix_post = (self.pix_post + 1) % PIX_POSTS.len(),
-            KeyCode::Char('M') => self.mesh = (self.mesh + 1) % MESH_MODES.len(),
-            KeyCode::Char(';') => {
-                // Off → each particle mode → off.
-                self.part = match self.part {
-                    None => Some(0),
-                    Some(i) if i + 1 < PIX_PARTICLES.len() => Some(i + 1),
-                    Some(_) => None,
-                };
-            }
             KeyCode::Char('\'') => self.cell_post = (self.cell_post + 1) % CELL_POSTS.len(),
             KeyCode::Char('x') => {
                 // Cycle FILTER → SPACE → DUBECHO → CRUSH → OFF → …
@@ -588,14 +518,17 @@ impl App {
             }
             KeyCode::Char(c @ '1'..='9') => {
                 let i = (c as usize) - ('1' as usize);
-                if i < self.effects.len() {
-                    self.channels[self.focus].slot = i;
+                if i < self.unit_list.len() {
+                    self.channels[self.focus].slot = self.unit_list[i].1;
                 }
             }
             _ => {
-                // Unclaimed keys go to the focused channel's effect.
-                let target = self.channels[self.focus].slot;
-                self.effects[target].on_key(code);
+                // Unclaimed keys go to the focused channel's effect, if
+                // that channel is holding one — a pixel unit is a plain
+                // function and has nothing to press.
+                if let units::Unit::Cell(i) = self.channels[self.focus].slot {
+                    self.effects[i].on_key(code);
+                }
             }
         }
     }
@@ -639,6 +572,101 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Move the focused channel through the unit list.
+    fn step_unit(&mut self, d: i32) {
+        let n = self.unit_list.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = self
+            .unit_list
+            .iter()
+            .position(|(_, u)| *u == self.channels[self.focus].slot)
+            .unwrap_or(0) as i32;
+        let next = (cur + d).rem_euclid(n) as usize;
+        self.channels[self.focus].slot = self.unit_list[next].1;
+    }
+
+    /// Is any channel holding a pixel unit at an audible level? That is
+    /// all "the graphics tier is on" ever meant.
+    fn pixel_channels_live(&self) -> bool {
+        self.channels
+            .iter()
+            .any(|c| c.slot.medium() == units::Medium::Pixels && c.level > 0.004)
+    }
+
+    /// Draw one pixel-medium unit into the framebuffer. `gain` scales
+    /// the units that composite; the ones that establish the picture are
+    /// blended by the caller instead, since scaling their brightness is
+    /// not the same as mixing them in.
+    fn draw_pix_unit(&mut self, kind: units::Pix, beat: f64, gain: f64) {
+        let acc = self.accent;
+        let white = (255, 255, 255);
+        let i = self.intensity;
+        match kind {
+            units::Pix::Plasma => pixfx::plasma(&mut self.gfx_fb, beat, i),
+            units::Pix::Tunnel => pixfx::tunnel(&mut self.gfx_fb, beat, i),
+            units::Pix::Stars => pixfx::starfield(&mut self.gfx_fb, beat, i),
+            units::Pix::Cam => {
+                if let Some(img) = self.capture.borrow().as_ref().and_then(|c| c.latest()) {
+                    source::draw_pixels(&mut self.gfx_fb, &img, self.drive.gbeat(), i, true);
+                }
+            }
+            units::Pix::Plate => {
+                if let Some(p) = self.plates.get(self.pix_plate % self.plates.len().max(1)) {
+                    source::draw_pixels(&mut self.gfx_fb, &p.img, self.drive.gbeat(), i, false);
+                }
+            }
+            units::Pix::Sparks => {
+                pixparticles::sparks(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+            }
+            units::Pix::PxTunnel => {
+                pixparticles::tunnel_px(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+            }
+            units::Pix::Floor => {
+                pixparticles::grid_floor(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+            }
+            units::Pix::Rings => {
+                pixparticles::rings(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+            }
+            units::Pix::MeshCube => meshcube::cube(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                i,
+                &self.drive,
+                &self.plates,
+            ),
+            units::Pix::MeshWire => meshwire::wire(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                i * gain,
+                &self.drive,
+                acc,
+                white,
+            ),
+            units::Pix::MeshSpeaker => meshspeaker::speaker(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                i,
+                &self.drive,
+                acc,
+                white,
+            ),
+        }
+    }
+
+    /// The display name of a unit, whichever medium it is.
+    fn unit_name(&self, u: units::Unit) -> &'static str {
+        self.unit_list
+            .iter()
+            .find(|(_, x)| *x == u)
+            .map(|(n, _)| *n)
+            .unwrap_or("?")
     }
 
     /// Combined scrub from every jog, in beats.
@@ -747,10 +775,13 @@ impl App {
                 self.pix_post = i;
             }
         }
-        self.part = sc
-            .particle
-            .name()
-            .and_then(|n| PIX_PARTICLES.iter().position(|(name, _)| *name == n));
+        // A scene naming a particle mode puts it on the top channel, so
+        // its choice lands somewhere an operator can see and override.
+        if let Some(n) = sc.particle.name()
+            && let Some(&(_, u)) = self.unit_list.iter().find(|(name, _)| *name == n)
+        {
+            self.channels[CHANNELS - 1].slot = u;
+        }
         // A hit that wants a cell-post slot takes it if the posts left
         // one free — beat-momentary treatments read louder than a
         // persistent one, so they win the slot.
@@ -973,85 +1004,49 @@ impl App {
         };
         self.gfx_fb.resize(pw, ph);
         let beat = self.triggers.warp_beat(self.clock.beat()) + self.jog_offset();
-        // Image sources land straight in the framebuffer, so every post
-        // pass below applies to a camera or a plate exactly as it does
-        // to a generated field.
-        match self.pix {
-            PixSource::Generated(i) => PIX_FX[i].1(&mut self.gfx_fb, beat, self.intensity),
-            PixSource::Cam => {
-                if let Some(img) = self.capture.borrow().as_ref().and_then(|c| c.latest()) {
-                    source::draw_pixels(
-                        &mut self.gfx_fb,
-                        &img,
-                        self.drive.gbeat(),
-                        self.intensity,
-                        true,
-                    );
+
+        // Pixel-medium channels, bottom to top, each scaled by its own
+        // fader. A unit that establishes the picture is blended in; one
+        // that composites (particles, the wire rig) is drawn straight on
+        // top, because that is what additive means.
+        self.gfx_fb.px.fill(0);
+        if self.scratch_fb.w != pw || self.scratch_fb.h != ph {
+            self.scratch_fb = graphics::Framebuffer::new(pw, ph);
+        }
+        for i in 0..CHANNELS {
+            let (slot, level) = (self.channels[i].slot, self.channels[i].level);
+            let units::Unit::Pixel(kind) = slot else {
+                continue;
+            };
+            if level <= 0.004 {
+                continue;
+            }
+            // Solid geometry ducks what is already there so it carries
+            // the frame, exactly as the mode used to.
+            let dim = kind.dim_behind();
+            if dim < 0.999 {
+                for p in self.gfx_fb.px.iter_mut() {
+                    *p = (*p as f64 * dim) as u8;
                 }
             }
-            PixSource::Plate => {
-                if let Some(p) = self.plates.get(self.pix_plate % self.plates.len().max(1)) {
-                    source::draw_pixels(
-                        &mut self.gfx_fb,
-                        &p.img,
-                        self.drive.gbeat(),
-                        self.intensity,
-                        false,
-                    );
+            if kind.additive() {
+                // Composites over the frame, so it can draw straight in
+                // and the fader scales how hard it hits.
+                self.draw_pix_unit(kind, beat, level);
+            } else {
+                self.scratch_fb.px.fill(0);
+                std::mem::swap(&mut self.gfx_fb, &mut self.scratch_fb);
+                self.draw_pix_unit(kind, beat, 1.0);
+                // gfx_fb now holds this unit; blend it over the picture
+                // that was there, weighted by the fader.
+                std::mem::swap(&mut self.gfx_fb, &mut self.scratch_fb);
+                let k = level.clamp(0.0, 1.0);
+                for (dst, src) in self.gfx_fb.px.iter_mut().zip(self.scratch_fb.px.iter()) {
+                    *dst = (*dst as f64 * (1.0 - k) + *src as f64 * k) as u8;
                 }
             }
         }
-        // Mesh geometry is opaque and carries the frame, so the base
-        // effect behind it ducks by the mode's own amount before the
-        // solid passes land.
-        let mode = MESH_MODES[self.mesh].1;
-        let dim = mode.plate_dim();
-        if dim < 0.999 {
-            for p in self.gfx_fb.px.iter_mut() {
-                *p = (*p as f64 * dim) as u8;
-            }
-        }
-        match mode {
-            MeshMode::None => {}
-            MeshMode::Cube => meshcube::cube(
-                &mut self.gfx_fb,
-                &mut self.depth,
-                beat,
-                self.intensity,
-                &self.drive,
-                &self.plates,
-            ),
-            MeshMode::Wire => meshwire::wire(
-                &mut self.gfx_fb,
-                &mut self.depth,
-                beat,
-                self.intensity,
-                &self.drive,
-                self.accent,
-                (255, 255, 255),
-            ),
-            MeshMode::Speaker => meshspeaker::speaker(
-                &mut self.gfx_fb,
-                &mut self.depth,
-                beat,
-                self.intensity,
-                &self.drive,
-                self.accent,
-                (255, 255, 255),
-            ),
-        }
-        // Ported particle modes composite additively on top of the base
-        // effect — that is the `lighter` blend they had over there.
-        if let Some(p) = self.part {
-            PIX_PARTICLES[p].1(
-                &mut self.gfx_fb,
-                beat,
-                self.intensity,
-                &self.drive,
-                self.accent,
-                (255, 255, 255),
-            );
-        }
+
         let t = self.vt;
         match PIX_POSTS[self.pix_post].1 {
             PixPost::None => {}
@@ -1107,8 +1102,14 @@ impl App {
         // faders at full = a quarter of the cells each; one fader alone
         // at 30% = 30% of its cells. The per-cell hash is fixed, so the
         // allocation is stable frame to frame instead of boiling.
+        // Only the cell-medium channels enter the lottery. A channel
+        // holding a pixel unit draws into the shared framebuffer
+        // instead, and that lands under the cells — see render_pixels.
         let active: Vec<usize> = (0..CHANNELS)
-            .filter(|&i| self.channels[i].level > 0.004)
+            .filter(|&i| {
+                self.channels[i].level > 0.004
+                    && self.channels[i].slot.medium() == units::Medium::Cells
+            })
             .collect();
         if self.scratch.len() != CHANNELS || self.scratch[0].area != stage {
             self.scratch = (0..CHANNELS)
@@ -1117,8 +1118,9 @@ impl App {
         }
         for &i in &active {
             self.scratch[i].reset();
-            let slot = self.channels[i].slot;
-            self.effects[slot].render(&mut self.scratch[i], stage, &ctx);
+            if let units::Unit::Cell(e) = self.channels[i].slot {
+                self.effects[e].render(&mut self.scratch[i], stage, &ctx);
+            }
         }
         for y in 0..stage.height {
             for x in 0..stage.width {
@@ -1330,10 +1332,12 @@ impl App {
 
         let bar = (beat / 4.0).floor() as i64 + 1;
         let beat_in_bar = ctx.bar_phase as i64 + 1;
-        let status = self.effects[self.channels[self.focus].slot]
-            .status()
-            .map(|s| format!(" [{s}]"))
-            .unwrap_or_default();
+        let status = match self.channels[self.focus].slot {
+            units::Unit::Cell(i) => self.effects[i].status(),
+            units::Unit::Pixel(_) => None,
+        }
+        .map(|s| format!(" [{s}]"))
+        .unwrap_or_default();
         let mut trig_seg = self.triggers.hud();
         if let Some(sp) = self.jog_spin() {
             trig_seg.push_str(&format!(" ▶{}", sp.name()));
@@ -1378,22 +1382,11 @@ impl App {
             }
             s
         };
-        let gfx_seg = if self.gfx {
-            let part = match self.part {
-                Some(p) => format!("+{}", PIX_PARTICLES[p].0),
-                None => String::new(),
-            };
-            let mesh = if self.mesh > 0 {
-                format!("+{}", MESH_MODES[self.mesh].0)
-            } else {
-                String::new()
-            };
-            let post = if self.pix_post > 0 {
-                format!(">{}", PIX_POSTS[self.pix_post].0)
-            } else {
-                String::new()
-            };
-            format!("▓{}{mesh}{part}{post} ", self.pix.name())
+        // The pixel tier is no longer a mode, so the HUD only reports
+        // the post chain over it — which channels are pixel-medium is
+        // already visible in the deck list.
+        let gfx_seg = if self.pix_post > 0 && self.pixel_channels_live() {
+            format!("▓>{} ", PIX_POSTS[self.pix_post].0)
         } else {
             String::new()
         };
@@ -1412,7 +1405,7 @@ impl App {
                     format!(
                         "{mark}{}:{}·{:.0}{col}",
                         i + 1,
-                        self.effects[c.slot].name(),
+                        self.unit_name(c.slot),
                         c.level * 100.0
                     )
                 })
@@ -1505,7 +1498,7 @@ impl App {
             " │ M:none".to_string()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p M w x b o h y k a C n r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -1524,7 +1517,6 @@ impl App {
             self.ai.hud(),
             self.intensity * 100.0,
             self.render_ms,
-            self.effects.len(),
         );
         frame.render_widget(
             Paragraph::new(Line::from(hud_text)).style(Style::new().fg(Color::DarkGray)),
@@ -1638,7 +1630,7 @@ fn main() -> std::io::Result<()> {
         terminal.draw(|f| app.draw(f))?;
         // Graphics tier: place the pixel stage over the blank stage cells
         // ratatui just drew. Leaving gfx mode clears the image once.
-        if app.gfx {
+        if app.pixel_channels_live() {
             app.render_pixels(&mut std::io::stdout().lock())?;
             gfx_was_on = true;
         } else if gfx_was_on {
