@@ -8,11 +8,11 @@
 //! color plasma filling the window, the transport works and we can wire
 //! it into the mixer as a channel effect.
 
-#[path = "../src/graphics.rs"]
-mod graphics;
 #[allow(dead_code)]
 #[path = "../src/drive.rs"]
 mod drive;
+#[path = "../src/graphics.rs"]
+mod graphics;
 #[allow(dead_code)]
 #[path = "../src/pass.rs"]
 mod pass;

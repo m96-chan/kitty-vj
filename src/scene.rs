@@ -330,6 +330,10 @@ pub struct Scene {
     pub particle: Particle,
     pub fit: Fit,
     pub accent: (u8, u8, u8),
+    /// The palette's second voice. The post passes take two accents
+    /// (edge draws in both); hardcoding the second to white made a
+    /// third of every style's palette unreachable.
+    pub accent_b: (u8, u8, u8),
     /// Degrees, for the looks that map luminance onto one hue.
     pub hue_base: f64,
     /// Cut back and forth between two sources on the bar.
@@ -363,16 +367,16 @@ impl Scene {
             particle: one(p.particles, c(1)),
             fit: one(p.fits, c(2)),
             accent: one(p.accents, c(3)),
+            accent_b: {
+                // A different palette entry when there is one to take.
+                let n = p.accents.len();
+                p.accents[(((c(3) * n as f64) as usize) + 1) % n.max(1)]
+            },
             hue_base: (p.hue.0 + c(0) * p.hue.1).rem_euclid(360.0),
             abcut: f(0) < P_ABCUT,
             stutter: f(1) < P_STUTTER,
             seed,
         }
-    }
-
-    /// The scene's primary look — the one a single-look pipeline uses.
-    pub fn look(&self) -> Look {
-        self.looks.first().copied().unwrap_or(Look::Plain)
     }
 
     pub fn has_hit(&self, h: Hit) -> bool {
@@ -742,7 +746,7 @@ mod tests {
                 let b = Scene::roll(style, seed);
                 assert_eq!(a.hud(), b.hud());
                 assert_eq!(a.seed, seed, "a scene must carry the seed that made it");
-                assert!(a.look() == b.look());
+                assert!(a.looks == b.looks);
                 assert_eq!(a.accent, b.accent);
                 assert_eq!(a.fit, b.fit);
                 assert_eq!(a.hue_base.to_bits(), b.hue_base.to_bits());

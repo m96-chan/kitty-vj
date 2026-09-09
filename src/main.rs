@@ -179,11 +179,15 @@ struct App {
     /// Opening/closing sequences; their exports gate the rest.
     show: show::Show,
     show_state: show::ShowState,
-    /// Persistent colour treatment over the whole mix ('w' cycles).
-    look: looks::Look,
+    /// Persistent colour treatments over the whole mix, applied in
+    /// order. A scene rolls one or two (45% chance of the second) —
+    /// carrying only the first silently dropped half the roll. 'w'
+    /// replaces the set with a single manual pick.
+    looks: Vec<looks::Look>,
     /// Per-scene random hue for duotone, and the palette accent for lut.
     hue_base: f64,
     accent: (u8, u8, u8),
+    accent_b: (u8, u8, u8),
     /// Drive signals derived from the clock (and audio when running).
     drive: drive::Drive,
     /// Generative plugins; empty until an adapter is registered (#17).
@@ -292,9 +296,10 @@ impl App {
             escapes: 0,
             show: show::Show::new(),
             show_state: show::ShowState::neutral(),
-            look: looks::Look::Plain,
+            looks: vec![looks::Look::Plain],
             hue_base: 210.0,
             accent: (0, 255, 213),
+            accent_b: (255, 255, 255),
             drive: drive::Drive::default(),
             ai: generate::Registry::default(),
             lyrics,
@@ -390,7 +395,8 @@ impl App {
             KeyCode::Char('A') => self.show.arm(),
             KeyCode::Char('E') => self.show.play_out(),
             KeyCode::Char('w') => {
-                self.look = self.look.next();
+                let cur = self.looks.first().copied().unwrap_or(looks::Look::Plain);
+                self.looks = vec![cur.next()];
                 // A fresh hue each time duotone comes round.
                 self.hue_base = (self.hue_base + 47.0).rem_euclid(360.0);
             }
@@ -608,7 +614,7 @@ impl App {
     /// not the same as mixing them in.
     fn draw_pix_unit(&mut self, kind: units::Pix, beat: f64, gain: f64) {
         let acc = self.accent;
-        let white = (255, 255, 255);
+        let acc_b = self.accent_b;
         let i = self.intensity;
         match kind {
             units::Pix::Plasma => pixfx::plasma(&mut self.gfx_fb, beat, i),
@@ -625,16 +631,16 @@ impl App {
                 }
             }
             units::Pix::Sparks => {
-                pixparticles::sparks(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+                pixparticles::sparks(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, acc_b)
             }
             units::Pix::PxTunnel => {
-                pixparticles::tunnel_px(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+                pixparticles::tunnel_px(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, acc_b)
             }
             units::Pix::Floor => {
-                pixparticles::grid_floor(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+                pixparticles::grid_floor(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, acc_b)
             }
             units::Pix::Rings => {
-                pixparticles::rings(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, white)
+                pixparticles::rings(&mut self.gfx_fb, beat, i * gain, &self.drive, acc, acc_b)
             }
             units::Pix::MeshCube => meshcube::cube(
                 &mut self.gfx_fb,
@@ -651,7 +657,7 @@ impl App {
                 i * gain,
                 &self.drive,
                 acc,
-                white,
+                acc_b,
             ),
             units::Pix::MeshSpeaker => meshspeaker::speaker(
                 &mut self.gfx_fb,
@@ -660,9 +666,16 @@ impl App {
                 i,
                 &self.drive,
                 acc,
-                white,
+                acc_b,
             ),
         }
+    }
+
+    /// Beat time as the effects see it: the clock, bent by the backspin
+    /// pad, scrubbed by the jogs. Derived in one place — the cell and
+    /// pixel tiers diverge the moment one of them gains a term.
+    fn vbeat(&self) -> f64 {
+        self.triggers.warp_beat(self.clock.beat()) + self.jog_offset()
     }
 
     /// Run one colour pass over the whole stage. This is the mechanism
@@ -795,9 +808,10 @@ impl App {
     /// indices, so the tables stay the app's business — adding an effect
     /// means adding a row here and a name there, not touching scene.rs.
     fn apply_scene(&mut self, sc: &scene::Scene) {
-        self.look = sc.look();
+        self.looks = sc.looks.clone();
         self.hue_base = sc.hue_base;
         self.accent = sc.accent;
+        self.accent_b = sc.accent_b;
         self.abcut = sc.abcut;
         self.stutter = sc.stutter;
         // Posts: the scene names one of each kind, or none.
@@ -1043,7 +1057,7 @@ impl App {
             ((long * cols as u32 / (rows as u32 * 2)).max(1), long)
         };
         self.gfx_fb.resize(pw, ph);
-        let beat = self.triggers.warp_beat(self.clock.beat()) + self.jog_offset();
+        let beat = self.vbeat();
 
         // Pixel-medium channels, bottom to top, each scaled by its own
         // fader. A unit that establishes the picture is blended in; one
@@ -1071,8 +1085,10 @@ impl App {
             }
             if kind.additive() {
                 // Composites over the frame, so it can draw straight in
-                // and the fader scales how hard it hits.
-                self.draw_pix_unit(kind, beat, level);
+                // and the fader scales how hard it hits. The show's
+                // particles export rides along: the intro fades the
+                // fields in and the outro bursts then collapses them.
+                self.draw_pix_unit(kind, beat, level * self.show_state.particles);
             } else {
                 self.scratch_fb.px.fill(0);
                 std::mem::swap(&mut self.gfx_fb, &mut self.scratch_fb);
@@ -1095,7 +1111,7 @@ impl App {
             PixPost::ZoomBlur => pixpost::zoomblur(&mut self.gfx_fb, &self.drive, self.intensity),
             PixPost::RgbSplit => pixpost::rgb_split(&mut self.gfx_fb, &self.drive, self.intensity),
             PixPost::Edge => {
-                pixpost::edge(&mut self.gfx_fb, &self.drive, self.accent, (255, 255, 255))
+                pixpost::edge(&mut self.gfx_fb, &self.drive, self.accent, self.accent_b)
             }
             PixPost::Bloom => pixpost::bloom(&mut self.gfx_fb, &self.drive, self.intensity),
             PixPost::Crt => pixpost::crt(&mut self.gfx_fb, 0.55),
@@ -1119,7 +1135,7 @@ impl App {
         let beat = self.clock.beat();
         // Backspin bends the beat the effects see; the jogs scrub it
         // continuously on top. The clock itself keeps real time.
-        let vbeat = self.triggers.warp_beat(beat) + self.jog_offset();
+        let vbeat = self.vbeat();
         let ctx = FrameCtx {
             beat: vbeat,
             vt: self.vt,
@@ -1215,7 +1231,9 @@ impl App {
                             hue_base: self.hue_base,
                             accent: self.accent,
                         };
-                        self.look.apply(&mut cell, &cctx);
+                        for lk in &self.looks {
+                            lk.apply(&mut cell, &cctx);
+                        }
                         if self.scfx_on {
                             let sc = scfx::Scfx {
                                 kind: self.scfx_type,
@@ -1293,6 +1311,37 @@ impl App {
                         cell.fg = pass::rgb(acc.0 / n, acc.1 / n, acc.2 / n);
                     }
                 }
+            }
+        }
+
+        // The show's hold freezes the frame outright (the outro's first
+        // beat). Reuses the stutter's held buffer — it is the same
+        // gesture with a different trigger.
+        if self.show_state.hold {
+            if let Some(h) = &self.stutter_hold
+                && h.area == stage
+            {
+                for y in 0..stage.height {
+                    for x in 0..stage.width {
+                        let (ax, ay) = (stage.x + x, stage.y + y);
+                        frame.buffer_mut()[(ax, ay)] = h[(ax, ay)].clone();
+                    }
+                }
+            } else {
+                let mut h = ratatui::buffer::Buffer::empty(stage);
+                for y in 0..stage.height {
+                    for x in 0..stage.width {
+                        let (ax, ay) = (stage.x + x, stage.y + y);
+                        h[(ax, ay)] = frame.buffer_mut()[(ax, ay)].clone();
+                    }
+                }
+                self.stutter_hold = Some(h);
+            }
+        } else if !self.stutter {
+            // Neither holder wants the buffer: drop it so a stale frame
+            // cannot resurface later.
+            if self.stutter_hold.is_some() && !self.show_state.hold {
+                self.stutter_hold = None;
             }
         }
 
@@ -1384,11 +1433,13 @@ impl App {
                 hue_base: self.hue_base,
                 accent: self.accent,
             };
-            let mut s = if ColorPass::amount(&self.look, &probe) > 0.0 {
-                format!("{} ", ColorPass::name(&self.look))
-            } else {
-                String::new()
-            };
+            let mut s = String::new();
+            for lk in &self.looks {
+                if ColorPass::amount(lk, &probe) > 0.0 {
+                    s.push_str(ColorPass::name(lk));
+                    s.push(' ');
+                }
+            }
             if self.cell_post > 0 {
                 s.push_str(&format!("{} ", CELL_POSTS[self.cell_post].0));
             }

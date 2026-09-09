@@ -170,9 +170,10 @@ impl ShowState {
 
 /// The Transform shape: the show's master exports are a per-cell colour
 /// transform like any look — the mono wash, the white hit and the master
-/// fade, in that order. `plate`, `particles`, `zoom`, `logo` and `hold`
-/// are not colours and are consumed elsewhere (or await consumers, which
-/// the app documents at its call sites rather than hiding here).
+/// fade, in that order. `hold` (frame freeze) and `particles` (field
+/// gain) are consumed by the compositor; `plate`, `zoom` and `logo`
+/// still await consumers — the artwork dim needs the compositor to know
+/// which channels hold artwork, and the logo needs a mark to draw.
 impl crate::pass::ColorPass for ShowState {
     fn name(&self) -> &'static str {
         "SHOW"

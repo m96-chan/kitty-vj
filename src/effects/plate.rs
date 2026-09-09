@@ -258,17 +258,41 @@ impl Effect for PlateFx {
         for cy in 0..area.height {
             for cx in 0..area.width {
                 // The Mixer decides, per cell, which plate wins.
-                let show_new = old.is_none() || tr.shows_b(cx, cy, area.width, area.height, mix);
+                // A keyed transition (LUMA) decides by the incoming
+                // frame's brightness, so the new plate is sampled first
+                // for those; the sample is reused when the cell shows it.
+                let new_top = px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 0.5);
+                let show_new = old.is_none()
+                    || if tr.keyed() {
+                        let l =
+                            crate::pass::luma(new_top.0 as f64, new_top.1 as f64, new_top.2 as f64)
+                                / 255.0;
+                        tr.shows_b_keyed(cx, cy, area.width, area.height, mix, l)
+                    } else {
+                        tr.shows_b(cx, cy, area.width, area.height, mix)
+                    };
                 let (top, bot) = match (show_new, old) {
-                    (true, _) => (
-                        px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 0.5),
-                        px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 1.5),
-                    ),
+                    (true, _) => (new_top, px_at(cx as f64 + 0.5, cy as f64 * 2.0 + 1.5)),
                     (false, Some(o)) => (
                         px_at_img(o, cx as f64 + 0.5, cy as f64 * 2.0 + 0.5),
                         px_at_img(o, cx as f64 + 0.5, cy as f64 * 2.0 + 1.5),
                     ),
                     (false, None) => unreachable!("no outgoing plate"),
+                };
+                // FLASH's white bloom: the mask picks a side, it cannot
+                // brighten, so the lift happens here.
+                let wo = if old.is_some() { tr.whiteout(mix) } else { 0.0 };
+                let (top, bot) = if wo > 0.0 {
+                    let lift = |c: (u8, u8, u8)| {
+                        (
+                            (c.0 as f64 + (255.0 - c.0 as f64) * wo) as u8,
+                            (c.1 as f64 + (255.0 - c.1 as f64) * wo) as u8,
+                            (c.2 as f64 + (255.0 - c.2 as f64) * wo) as u8,
+                        )
+                    };
+                    (lift(top), lift(bot))
+                } else {
+                    (top, bot)
                 };
                 let cell = &mut buf[(area.x + cx, area.y + cy)];
                 cell.set_char('▀');
