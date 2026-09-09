@@ -78,6 +78,28 @@ const CHANNELS: usize = 4;
 /// its choices as strings, and a collision would resolve to whichever
 /// entry came first — silently, and only for the scenes that picked the
 /// loser.
+/// Construct the cell effects, in the order `effects::CELL_NAMES`
+/// documents. One function so the app and the bridge test cannot drift.
+fn build_effects(
+    plates: std::rc::Rc<Vec<assets::Plate>>,
+    cap: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>>,
+) -> Vec<Box<dyn Effect>> {
+    let mut effects: Vec<Box<dyn Effect>> = vec![
+        Box::new(Pulse),
+        Box::new(Rain),
+        Box::new(Tunnel),
+        Box::new(Collapse),
+        Box::new(Cube::new(plates.clone())),
+        Box::new(Sparks),
+    ];
+    if !plates.is_empty() {
+        effects.push(Box::new(ImgDust::new(plates.clone())));
+        effects.push(Box::new(PlateFx::new(plates)));
+    }
+    effects.push(Box::new(CamFx::new(cap)));
+    effects
+}
+
 fn build_unit_list(n_cell: usize, cell_names: &[&'static str]) -> Vec<(&'static str, units::Unit)> {
     let mut v: Vec<(&'static str, units::Unit)> = (0..n_cell)
         .map(|i| (cell_names[i], units::Unit::Cell(i)))
@@ -269,25 +291,17 @@ impl App {
     fn new(plates: Vec<assets::Plate>, text: String, lyrics: lyrics::Lyrics) -> Self {
         let bindings = config::load(&config::path());
         let plates = std::rc::Rc::new(plates);
-        let mut effects: Vec<Box<dyn Effect>> = vec![
-            Box::new(Pulse),
-            Box::new(Rain),
-            Box::new(Tunnel),
-            Box::new(Collapse),
-            Box::new(Cube::new(plates.clone())),
-            Box::new(Sparks),
-        ];
-        if !plates.is_empty() {
-            effects.push(Box::new(ImgDust::new(plates.clone())));
-            effects.push(Box::new(PlateFx::new(plates.clone())));
-        }
-        let plates_shared = plates;
         // CAM is always available as a channel slot; it simply draws
         // nothing until a capture is opened.
         let cap_shared: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
-        effects.push(Box::new(CamFx::new(cap_shared.clone())));
+        let effects = build_effects(plates.clone(), cap_shared.clone());
+        let plates_shared = plates;
         let cell_names: Vec<&'static str> = effects.iter().map(|e| e.name()).collect();
+        debug_assert!(
+            cell_names.iter().all(|n| effects::CELL_NAMES.contains(n)),
+            "an effect name is missing from effects::CELL_NAMES"
+        );
         let unit_list = build_unit_list(effects.len(), &cell_names);
         Self {
             clock: InternalClock::new(120.0),
@@ -952,6 +966,17 @@ impl App {
                 && let Some(i) = PIX_POSTS.iter().position(|(name, _)| *name == n)
             {
                 self.pix_post = i;
+            }
+        }
+        // The cast: which unit each of the three lower channels holds.
+        // This is the combination itself — the parts are the ported
+        // effects, the scene is the recipe. A name that doesn't resolve
+        // (no plates loaded) leaves the operator's unit in place, and a
+        // manual pick made mid-scene lives until the next change stomps
+        // it, same as every other scene choice.
+        for (i, name) in sc.cast.iter().enumerate() {
+            if let Some(&(_, u)) = self.unit_list.iter().find(|(n, _)| n == name) {
+                self.channels[i].slot = u;
             }
         }
         // A scene naming a particle mode puts it on the top channel, so
@@ -1869,6 +1894,11 @@ fn main() -> std::io::Result<()> {
         event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     );
     let mut app = App::new(plates, text, lyrics);
+    // The first roll goes live from frame one — before this, the opening
+    // scene's cast and palette only landed at the first change, so the
+    // rig started on defaults no scene had chosen.
+    let first = app.scenes.scene().clone();
+    app.apply_scene(&first);
 
     let mut last = Instant::now();
     let mut acc = 0.0_f64;
@@ -1936,4 +1966,39 @@ fn main() -> std::io::Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod app_tests {
+    use super::*;
+
+    #[test]
+    fn built_effects_carry_the_canonical_names() {
+        // The bridge between `effects::CELL_NAMES` and the instances the
+        // app actually runs: a rename in an `Effect::name()` or a
+        // reorder in `build_effects` must fail here, not resolve a
+        // scene's cast to the wrong unit at showtime.
+        let plate = assets::Plate {
+            name: "T".into(),
+            img: image::RgbImage::new(2, 2),
+        };
+        let cap: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let with: Vec<&str> = build_effects(std::rc::Rc::new(vec![plate]), cap.clone())
+            .iter()
+            .map(|e| e.name())
+            .collect();
+        assert_eq!(with, effects::CELL_NAMES);
+        // Without plates the plate-fed pair is absent and order holds.
+        let without: Vec<&str> = build_effects(std::rc::Rc::new(vec![]), cap)
+            .iter()
+            .map(|e| e.name())
+            .collect();
+        let expect: Vec<&str> = effects::CELL_NAMES
+            .iter()
+            .copied()
+            .filter(|n| *n != "IMGDUST" && *n != "PLATE")
+            .collect();
+        assert_eq!(without, expect);
+    }
 }

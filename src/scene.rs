@@ -204,6 +204,15 @@ struct Pools {
     /// in degrees. A style is a colour decision before it is anything
     /// else, so the window is part of the table.
     hue: (f64, f64),
+    /// Channel casting, bottom to top: which unit each of the three
+    /// lower mixer channels holds, one draw per channel from its role
+    /// pool — ground, body, feature. The top channel stays the particle
+    /// stack. This is what makes a scene a combination rather than a
+    /// colour scheme: the ported effects are parts, and the recipe that
+    /// used to be hard-wired into each composite effect over there lives
+    /// here instead. Pools within a style are disjoint so a scene never
+    /// runs the same part on two channels.
+    cast: [&'static [&'static str]; 3],
 }
 
 const STYLES: [Pools; 4] = [
@@ -224,6 +233,11 @@ const STYLES: [Pools; 4] = [
         fits: &[Fit::Cover],
         accents: &[(0, 255, 213), (255, 0, 200), (120, 80, 255)],
         hue: (150.0, 210.0),
+        cast: [
+            &["PLASMA", "PXTUNNEL", "MWIRE"],
+            &["STARS", "TUBE", "TUNNEL"],
+            &["MCUBE", "CUBE", "PXPLATE"],
+        ],
     },
     // DECK — warm, club-lit, hits over treatment.
     Pools {
@@ -235,6 +249,11 @@ const STYLES: [Pools; 4] = [
         fits: &[Fit::Cover, Fit::Contain],
         accents: &[(255, 140, 0), (255, 40, 40), (255, 220, 120)],
         hue: (0.0, 60.0),
+        cast: [
+            &["FLOOR", "PXTUNNEL", "PULSE"],
+            &["MSPKR", "SPARKS", "STARS"],
+            &["PLATE", "MCUBE", "IMGDUST"],
+        ],
     },
     // INK — monochrome, cold, sparse. No colour flash: there is no
     // colour to flash.
@@ -247,6 +266,11 @@ const STYLES: [Pools; 4] = [
         fits: &[Fit::Contain, Fit::Cover],
         accents: &[(235, 235, 235), (150, 170, 190), (90, 110, 130)],
         hue: (190.0, 40.0),
+        cast: [
+            &["RAIN", "MWIRE", "COLLAPSE"],
+            &["TUNNEL", "STARS"],
+            &["CUBE", "PLATE"],
+        ],
     },
     // POSTER — flat graphic blocks. Deliberately holds no mirror and no
     // punch-in: a poster reads as a composition, and both of those break
@@ -261,6 +285,11 @@ const STYLES: [Pools; 4] = [
         fits: &[Fit::Contain],
         accents: &[(255, 60, 50), (250, 205, 40), (40, 90, 220)],
         hue: (0.0, 360.0),
+        cast: [
+            &["PULSE", "PLASMA"],
+            &["COLLAPSE", "STARS"],
+            &["PLATE", "PXPLATE", "IMGDUST"],
+        ],
     },
 ];
 
@@ -282,6 +311,7 @@ const SALT_ROTATE: u64 = 4;
 const SALT_LOOKS: u64 = 10;
 const SALT_HITS: u64 = 20;
 const SALT_POSTS: u64 = 30;
+const SALT_CAST: u64 = 40;
 
 impl Style {
     pub fn name(&self) -> &'static str {
@@ -328,6 +358,11 @@ pub struct Scene {
     /// 1-2 persistent post passes.
     pub posts: Vec<Post>,
     pub particle: Particle,
+    /// Units on the three lower mixer channels, bottom to top. Names,
+    /// not indices — the caller resolves them against its unit list, and
+    /// one that does not resolve (no plates loaded) leaves the
+    /// operator's unit in place.
+    pub cast: [&'static str; 3],
     pub fit: Fit,
     pub accent: (u8, u8, u8),
     /// The palette's second voice. The post passes take two accents
@@ -365,6 +400,9 @@ impl Scene {
             hits: draw(p.hits, n_hits, s, SALT_HITS),
             posts: draw(p.posts, n_posts, s, SALT_POSTS),
             particle: one(p.particles, c(1)),
+            cast: std::array::from_fn(|i| {
+                one(p.cast[i], unit_f64(hash3(s, SALT_CAST, i as u64)))
+            }),
             fit: one(p.fits, c(2)),
             accent: one(p.accents, c(3)),
             accent_b: {
@@ -387,8 +425,9 @@ impl Scene {
     pub fn hud(&self) -> String {
         let join = |v: Vec<&str>| v.join("+");
         let mut s = format!(
-            "{} {} {} {}",
+            "{} {} {} {} {}",
             self.style.name(),
+            self.cast.join("/"),
             join(self.looks.iter().map(|l| l.name()).collect()),
             join(self.hits.iter().map(|h| h.name()).collect()),
             join(self.posts.iter().map(|p| p.name()).collect()),
@@ -818,6 +857,31 @@ mod tests {
             for part in p.particles {
                 if let Some(n) = part.name() {
                     assert!(unit_names.contains(&n), "{n} is not a unit list entry");
+                }
+            }
+            // The cast pools name real units — cell or pixel, one list.
+            let all: Vec<&str> = crate::effects::CELL_NAMES
+                .iter()
+                .chain(unit_names.iter())
+                .copied()
+                .collect();
+            for pool in p.cast {
+                assert!(!pool.is_empty(), "{} has an empty cast pool", p.name);
+                for n in pool {
+                    assert!(all.contains(n), "{n} is not a castable unit");
+                }
+            }
+            // Disjoint across channels, as documented: the same part on
+            // two channels is a wasted slot, not a combination.
+            for (i, pool) in p.cast.iter().enumerate() {
+                for other in &p.cast[i + 1..] {
+                    for n in *pool {
+                        assert!(
+                            !other.contains(n),
+                            "{} casts {n} on two channels",
+                            p.name
+                        );
+                    }
                 }
             }
         }

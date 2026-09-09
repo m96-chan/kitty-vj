@@ -86,6 +86,17 @@ pub trait Effect {
     }
 }
 
+/// Every cell effect's name, in construction order, plates included.
+/// The single authority the scene tables and the collision tests check
+/// against — each used to keep its own copy, and a copy is worse than
+/// no test: it keeps passing while a rename turns a scene's choice into
+/// a silent no-op. `build_effects` in main.rs is bridge-tested to
+/// produce exactly these names, so a rename in an `Effect::name()`
+/// breaks a test instead of a gig.
+pub const CELL_NAMES: &[&str] = &[
+    "PULSE", "RAIN", "TUNNEL", "COLLAPSE", "CUBE", "SPARKS", "IMGDUST", "PLATE", "CAM",
+];
+
 /// The classic luminance ramp, dark to bright.
 pub const RAMP: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
