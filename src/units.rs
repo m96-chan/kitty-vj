@@ -35,6 +35,10 @@ pub enum Pix {
     MeshCube,
     MeshWire,
     MeshSpeaker,
+    /// The artwork on a tumbling framed panel — floats over the field.
+    MeshPlate,
+    /// The speaker rig as wireframe glow — layers instead of replacing.
+    WireSpeaker,
 }
 
 impl Pix {
@@ -42,10 +46,21 @@ impl Pix {
     /// framebuffer; the rest establish the picture. The compositor needs
     /// to know so a channel holding sparks does not erase the plate on
     /// the channel below it.
+    /// `MeshPlate` is here not because it adds light but because it
+    /// composites: it draws only its own silhouette, so the direct path
+    /// leaves the field around the panel standing — routing it through
+    /// the establish/blend path would fade the whole frame to black
+    /// around it at full fader.
     pub fn additive(&self) -> bool {
         matches!(
             self,
-            Pix::Sparks | Pix::PxTunnel | Pix::Floor | Pix::Rings | Pix::MeshWire
+            Pix::Sparks
+                | Pix::PxTunnel
+                | Pix::Floor
+                | Pix::Rings
+                | Pix::MeshWire
+                | Pix::MeshPlate
+                | Pix::WireSpeaker
         )
     }
 
@@ -75,7 +90,7 @@ pub enum Unit {
 /// The pixel-medium units, in the order they appear after the cell ones.
 /// Cell units are appended by the app, which knows how many effects it
 /// built (a plate list may be empty).
-pub const PIX_UNITS: [(&str, Pix); 12] = [
+pub const PIX_UNITS: [(&str, Pix); 14] = [
     ("PLASMA", Pix::Plasma),
     ("PXTUNNEL", Pix::Tunnel),
     ("STARS", Pix::Stars),
@@ -88,6 +103,8 @@ pub const PIX_UNITS: [(&str, Pix); 12] = [
     ("MCUBE", Pix::MeshCube),
     ("MWIRE", Pix::MeshWire),
     ("MSPKR", Pix::MeshSpeaker),
+    ("MPLATE", Pix::MeshPlate),
+    ("WSPKR", Pix::WireSpeaker),
 ];
 
 #[cfg(test)]

@@ -278,6 +278,78 @@ pub fn speaker(
     }
 }
 
+/// Wire tessellation per rank. Sparser than the lit rig on purpose: a
+/// wireframe reads by its lines, and hero-density lines melt into fill.
+const WIRE_SEG: [usize; 3] = [16, 10, 8];
+
+/// WSPKR — the same rig as [`speaker`], drawn as glowing wireframe.
+///
+/// Same placement, same roll, same delayed ring physics; only the
+/// material changes, borrowed whole from `meshwire` so both wire modes
+/// share one edge look. And unlike the lit rig this is **additive
+/// glow**: it layers over whatever field is already in the frame
+/// instead of replacing it, which is the reason it exists — the solid
+/// speaker over plasma is a scene swap, the wire speaker over plasma
+/// is a picture.
+pub fn speaker_wire(
+    fb: &mut Framebuffer,
+    depth: &mut DepthBuffer,
+    beat: f64,
+    intensity: f64,
+    d: &Drive,
+    ca: (u8, u8, u8),
+    cb: (u8, u8, u8),
+) {
+    let beat = if beat.is_finite() { beat } else { 0.0 };
+    let intensity = if intensity.is_finite() {
+        intensity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let scr = crate::meshwire::Screen::of_fb(fb);
+    let cam = Camera::matching(fb);
+    let Some(mut ras) = Raster::new(fb, depth, cam) else {
+        return;
+    };
+    // The wire tests depth but never writes it; clearing here means a
+    // stale buffer from another mesh this frame cannot eat the rig.
+    ras.clear_depth();
+
+    let roll = (beat * SEC_PER_BEAT * RIG_ROLL_RATE).sin() * RIG_ROLL;
+    let tick = (beat * JITTER_PER_BEAT).floor() as i64 as u64;
+    let react = d.react();
+    // The wire mode's own level law, so the two wire units breathe the
+    // same way when a scene stacks them.
+    let level = (0.35 + 0.65 * intensity) * (0.55 + 1.3 * react + 0.5 * d.thump.clamp(0.0, 1.0));
+    let width = 0.8 + 0.8 * react;
+    let (caf, cbf) = (rgbf(ca), rgbf(cb));
+
+    for (k, rank) in RIG.iter().enumerate() {
+        let v = ring_drive(d, beat, rank.delay);
+        let mesh = woofer(PUNCH * v, WIRE_SEG[k]);
+        let fog = (1.0 - (CAM_Z - rank.z - FOG_NEAR) * (1.0 / FOG_SPAN)).clamp(FOG_FLOOR, 1.0);
+        let col = mix(caf, cbf, k as f64 * 0.5);
+        let col = (
+            col.0 * level * fog,
+            col.1 * level * fog,
+            col.2 * level * fog,
+        );
+        for i in 0..rank.count {
+            let slot = (i as f64 + 0.5 * k as f64) / rank.count.max(1) as f64;
+            let (s, c) = (TAU * slot + roll).sin_cos();
+            let pos = v3(
+                rank.radius * c + jitter(k, i, 0, tick) * SHAKE * v,
+                rank.radius * s + jitter(k, i, 1, tick) * SHAKE * v,
+                rank.z + SURGE * v,
+            );
+            let xf = Transform::from_euler(0.0, 0.0, roll)
+                .with_uniform_scale(rank.size * (1.0 + SWELL * v))
+                .with_translation(pos);
+            crate::meshwire::draw_wire_mesh(&mut ras, &mesh, &xf, scr, width, col);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // drive
 // ---------------------------------------------------------------------

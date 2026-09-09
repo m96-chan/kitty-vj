@@ -236,7 +236,7 @@ const STYLES: [Pools; 4] = [
         cast: [
             &["PLASMA", "PXTUNNEL", "MWIRE"],
             &["STARS", "TUBE", "TUNNEL"],
-            &["MCUBE", "CUBE", "PXPLATE"],
+            &["MCUBE", "CUBE", "MPLATE"],
         ],
     },
     // DECK — warm, club-lit, hits over treatment.
@@ -251,7 +251,7 @@ const STYLES: [Pools; 4] = [
         hue: (0.0, 60.0),
         cast: [
             &["FLOOR", "PXTUNNEL", "PULSE"],
-            &["MSPKR", "SPARKS", "STARS"],
+            &["WSPKR", "MSPKR", "SPARKS"],
             &["PLATE", "MCUBE", "IMGDUST"],
         ],
     },
@@ -288,7 +288,7 @@ const STYLES: [Pools; 4] = [
         cast: [
             &["PULSE", "PLASMA"],
             &["COLLAPSE", "STARS"],
-            &["PLATE", "PXPLATE", "IMGDUST"],
+            &["PLATE", "PXPLATE", "MPLATE", "IMGDUST"],
         ],
     },
 ];

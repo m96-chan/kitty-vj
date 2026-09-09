@@ -44,11 +44,11 @@ pub struct Combo {
 pub const SAMPLES: &[(&str, &str)] = &[
     ("ACID", "PLASMA*0.6 + MCUBE + SPARKS3D*0.5"),
     ("VOID", "STARS*0.8 + MWIRE + TUBE*0.4"),
-    ("BOOTH", "FLOOR + MSPKR + RINGS*0.5"),
+    ("BOOTH", "FLOOR + WSPKR + RINGS*0.4"),
     ("PAPER", "PLATE + IMGDUST*0.5"),
     ("GRID", "RAIN*0.7 + FLOOR + MCUBE"),
     ("LIVE", "PXCAM + SPARKS3D*0.5"),
-    ("FRAME", "PXPLATE + MWIRE*0.6"),
+    ("FRAME", "PLASMA*0.5 + MPLATE + SPARKS3D*0.4"),
 ];
 
 /// A recipe never expands past this many parts; beyond it a "scene" is

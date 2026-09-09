@@ -16,6 +16,7 @@ mod link;
 mod looks;
 mod lyrics;
 mod meshcube;
+mod meshplate;
 mod meshspeaker;
 mod meshwire;
 mod midi;
@@ -782,6 +783,25 @@ impl App {
                 &mut self.depth,
                 beat,
                 i,
+                &self.drive,
+                acc,
+                acc_b,
+            ),
+            units::Pix::MeshPlate => meshplate::plate(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                i * gain,
+                &self.drive,
+                &self.plates,
+                acc,
+                acc_b,
+            ),
+            units::Pix::WireSpeaker => meshspeaker::speaker_wire(
+                &mut self.gfx_fb,
+                &mut self.depth,
+                beat,
+                i * gain,
                 &self.drive,
                 acc,
                 acc_b,

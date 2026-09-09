@@ -229,8 +229,9 @@ fn staircase(u: f64) -> f64 {
 /// Which plate the first face takes; the rest follow it round the list.
 /// The step wraps with `rem_euclid` rather than clamping the beat at zero,
 /// so scrubbing back before the start rotates backwards instead of
-/// sticking on plate zero.
-fn plate_base(beat: f64, len: usize) -> usize {
+/// sticking on plate zero. `pub(crate)`: the mesh plate steps its plate
+/// with the same law, so the two rotate together in a show.
+pub(crate) fn plate_base(beat: f64, len: usize) -> usize {
     if len == 0 {
         return 0;
     }

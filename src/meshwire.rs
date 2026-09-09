@@ -387,14 +387,28 @@ fn draw_blast(ras: &mut Raster, scr: Screen, fire: i64, beat: f64, look: &Look) 
 /// The camera, in the two numbers the derivative needs. Duplicated from
 /// the [`Raster`] rather than borrowed out of it because the gradient has
 /// to be known *before* the triangle is submitted.
+///
+/// `pub(crate)` with [`draw_wire_mesh`]: the wire speaker borrows this
+/// module's edge look wholesale, and a re-derived copy of the analytic
+/// fwidth is exactly the kind of duplicate the audit kept finding.
 #[derive(Clone, Copy)]
-struct Screen {
+pub(crate) struct Screen {
     cx: f64,
     cy: f64,
     focal: f64,
 }
 
 impl Screen {
+    /// Build from the framebuffer the raster will draw into — call it
+    /// BEFORE [`Raster::new`] borrows the framebuffer.
+    pub(crate) fn of_fb(fb: &Framebuffer) -> Self {
+        let cam = Camera::matching(fb);
+        Screen {
+            cx: fb.w as f64 * 0.5,
+            cy: fb.h as f64 * 0.5,
+            focal: cam.focal,
+        }
+    }
     /// Project a view-space point, clamping depth at the near plane
     /// rather than rejecting it. A triangle straddling the near plane
     /// still needs *some* gradient — the rasteriser will clip it properly
@@ -419,7 +433,7 @@ impl Screen {
 /// triangle and the shader closure is the only thing that sees the
 /// fragment — the closure has to be built around the triangle it will run
 /// on.
-fn draw_wire_mesh(
+pub(crate) fn draw_wire_mesh(
     ras: &mut Raster,
     mesh: &Mesh,
     xf: &Transform,
