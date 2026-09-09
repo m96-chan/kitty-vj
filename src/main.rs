@@ -1,6 +1,7 @@
 mod assets;
 mod audio;
 mod camera;
+mod capture;
 mod clock;
 mod config;
 mod drive;
@@ -41,7 +42,8 @@ use ratatui::widgets::Paragraph;
 
 use clock::{ClockSource, InternalClock, TapTempo};
 use effects::{
-    Collapse, Cube, Effect, FrameCtx, ImgDust, PlateFx, Pulse, Rain, Sparks, TextOverlay, Tunnel,
+    CamFx, Collapse, Cube, Effect, FrameCtx, ImgDust, PlateFx, Pulse, Rain, Sparks, TextOverlay,
+    Tunnel,
 };
 use pass::ColorPass;
 
@@ -243,6 +245,12 @@ struct App {
     part: Option<usize>,
     /// Post pass over the pixel frame.
     pix_post: usize,
+    /// Live capture, shared with the CAM effect. Opened on demand: a
+    /// camera costs a permission prompt, so it must be asked for.
+    capture: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>>,
+    capture_err: Option<String>,
+    /// Route camera motion into the drive signals.
+    motion_drive: bool,
     /// Plates, shared with the effects that sample them — the mesh cube
     /// textures its faces from the same rotation.
     plates: std::rc::Rc<Vec<assets::Plate>>,
@@ -279,6 +287,11 @@ impl App {
             effects.push(Box::new(PlateFx::new(plates.clone())));
         }
         let plates_shared = plates;
+        // CAM is always available as a channel slot; it simply draws
+        // nothing until a capture is opened.
+        let cap_shared: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        effects.push(Box::new(CamFx::new(cap_shared.clone())));
         Self {
             clock: InternalClock::new(120.0),
             tap: TapTempo::new(),
@@ -338,6 +351,9 @@ impl App {
             pix: 0,
             part: None,
             pix_post: 0,
+            capture: cap_shared,
+            capture_err: None,
+            motion_drive: false,
             plates: plates_shared,
             mesh: 0,
             depth: raster::DepthBuffer::new(1, 1),
@@ -389,6 +405,28 @@ impl App {
                 self.look = self.look.next();
                 // A fresh hue each time duotone comes round.
                 self.hue_base = (self.hue_base + 47.0).rem_euclid(360.0);
+            }
+            KeyCode::Char('C') => {
+                // A camera costs a permission prompt, so it is opened on
+                // demand rather than at launch.
+                if self.capture.borrow().is_some() {
+                    *self.capture.borrow_mut() = None;
+                    self.motion_drive = false;
+                } else {
+                    match capture::Capture::open("0") {
+                        Ok(c) => {
+                            *self.capture.borrow_mut() = Some(c);
+                            self.capture_err = None;
+                        }
+                        Err(e) => self.capture_err = Some(e),
+                    }
+                }
+            }
+            KeyCode::Char('n') if self.capture.borrow().is_some() => {
+                // Let the room push the visuals: frame differencing
+                // becomes a drive input, which is the one thing a live
+                // source can do that a plate cannot.
+                self.motion_drive = !self.motion_drive;
             }
             KeyCode::Char('k') => {
                 // Kill switch: cuts every generator for the rest of the
@@ -705,8 +743,16 @@ impl App {
         } else {
             None
         };
+        let motion = if self.motion_drive {
+            self.capture
+                .borrow()
+                .as_ref()
+                .map(|c| drive::MotionDrive { energy: c.motion() })
+        } else {
+            None
+        };
         let beat = self.clock.beat();
-        self.drive.update(dt, beat, audio);
+        self.drive.update(dt, beat, audio, motion);
     }
 
     /// Persist current CC bindings to the gig config next to the app.
@@ -1309,6 +1355,27 @@ impl App {
         } else {
             String::new()
         };
+        let cam = if let Some(e) = &self.capture_err {
+            format!(" │ CAM! {e}")
+        } else if let Some(c) = self.capture.borrow().as_ref() {
+            let m = if self.motion_drive {
+                format!(" mot{:.0}%", c.motion() * 100.0)
+            } else {
+                String::new()
+            };
+            // A frozen camera is the one failure macOS reports as
+            // success, so it earns its own word in the HUD.
+            let state = if c.frozen() {
+                "FROZEN?"
+            } else if c.alive() {
+                "live"
+            } else {
+                "wait"
+            };
+            format!(" │ CAM {state}{m}")
+        } else {
+            String::new()
+        };
         let lnk = match (&self.link, self.link_sync) {
             (Some(l), true) => format!(" │ ⇄Link {}p", l.peers()),
             (Some(_), false) => " │ ⇄ off".to_string(),
@@ -1353,7 +1420,7 @@ impl App {
             String::new()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p M w x b o h y k a r m c l q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-{} g p M w x b o h y k a C n r m c l q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -1366,6 +1433,7 @@ impl App {
                 "OFF"
             },
             aud,
+            cam,
             lnk,
             mid,
             self.ai.hud(),

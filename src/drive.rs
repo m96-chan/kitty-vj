@@ -35,7 +35,18 @@ impl Drive {
     /// Advance by real time, given the current beat position. `groove`
     /// and `thump`/`hit` come from audio when there is any; without it
     /// the clock alone drives the grid and groove sits at 1.
-    pub fn update(&mut self, dt: f64, beat: f64, audio: Option<AudioDrive>) {
+    ///
+    /// `motion` is a live camera's frame difference, when one is routed
+    /// in. It lifts the kick measure and fires the flinch, so an effect
+    /// written against these signals reacts to the room without knowing
+    /// a camera exists at all.
+    pub fn update(
+        &mut self,
+        dt: f64,
+        beat: f64,
+        audio: Option<AudioDrive>,
+        motion: Option<MotionDrive>,
+    ) {
         // Grid edges.
         let b = beat.floor() as i64;
         if b > self.last_beat {
@@ -78,6 +89,18 @@ impl Drive {
                 self.groove = 1.0;
             }
         }
+
+        if let Some(m) = motion {
+            let e = m.energy.clamp(0.0, 1.0);
+            // Movement adds to the kick rather than replacing it, so a
+            // still room still follows the music.
+            self.thump = (self.thump + e * 0.8).min(1.0);
+            // A sudden surge is a flinch — the same channel an onset
+            // uses, and for the same reason: it fires off the grid.
+            if e > 0.55 {
+                self.hit = self.hit.max(e);
+            }
+        }
     }
 
     /// Grid pulses scaled by beat presence — what effects should read.
@@ -97,6 +120,14 @@ impl Drive {
     }
 }
 
+/// Motion from a live camera, when it is routed in. Unlike everything
+/// else here this comes from the room rather than the record, which is
+/// the point: it lets the crowd push the visuals.
+#[derive(Clone, Copy, Default)]
+pub struct MotionDrive {
+    pub energy: f64,
+}
+
 /// What the audio analyser contributes, when A-mode is running.
 #[derive(Clone, Copy)]
 pub struct AudioDrive {
@@ -113,23 +144,23 @@ mod tests {
     #[test]
     fn beat_pulse_fires_and_decays() {
         let mut d = Drive::default();
-        d.update(0.01, 0.99, None);
+        d.update(0.01, 0.99, None, None);
         assert!(d.beat < 0.5, "no pulse before the beat");
-        d.update(0.01, 1.00, None);
+        d.update(0.01, 1.00, None, None);
         assert!(d.beat > 0.85, "pulse should fire on the beat: {}", d.beat);
         // One tau later it should be down to ~1/e.
-        d.update(TAU_BEAT, 1.10, None);
+        d.update(TAU_BEAT, 1.10, None, None);
         assert!(d.beat > 0.3 && d.beat < 0.45, "decay off: {}", d.beat);
     }
 
     #[test]
     fn bar_and_phrase_fire_on_their_multiples() {
         let mut d = Drive::default();
-        d.update(0.01, 4.0, None); // beat 4 = bar line
+        d.update(0.01, 4.0, None, None); // beat 4 = bar line
         assert!(d.bar > 0.85, "bar {}", d.bar);
         assert!(d.phrase < 0.1, "phrase should not fire on beat 4");
         let mut e = Drive::default();
-        e.update(0.01, 16.0, None);
+        e.update(0.01, 16.0, None, None);
         // Phrase has the fastest tau (0.06 s), so it is already off 1.0.
         assert!(e.phrase > 0.8, "phrase {}", e.phrase);
     }
@@ -146,6 +177,7 @@ mod tests {
                 groove: 0.0,
                 hit: false,
             }),
+            None,
         );
         assert!(d.beat > 0.85);
         assert!(d.gbeat() < 0.3, "gbeat should be damped: {}", d.gbeat());
@@ -163,19 +195,55 @@ mod tests {
                 groove: 0.0,
                 hit: true,
             }),
+            None,
         );
         // The flinch fires between beats and keeps full amplitude.
         assert!(d.hit > 0.9, "hit {}", d.hit);
     }
 
     #[test]
+    fn motion_lifts_the_kick_without_replacing_it() {
+        // A still room must still follow the music, so motion adds.
+        let mut quiet = Drive::default();
+        quiet.update(0.01, 1.0, None, None);
+        let mut moving = Drive::default();
+        moving.update(0.01, 1.0, None, Some(MotionDrive { energy: 0.5 }));
+        assert!(
+            moving.thump > quiet.thump,
+            "motion should lift thump: {} vs {}",
+            moving.thump,
+            quiet.thump
+        );
+        assert!(moving.thump <= 1.0);
+    }
+
+    #[test]
+    fn a_surge_of_movement_fires_the_flinch() {
+        // The room jumping should reach the same channel an onset does,
+        // and off the grid, since that is when a crowd actually moves.
+        let mut d = Drive::default();
+        d.update(0.01, 0.5, None, Some(MotionDrive { energy: 0.9 }));
+        assert!(d.hit > 0.8, "hit {}", d.hit);
+        let mut calm = Drive::default();
+        calm.update(0.01, 0.5, None, Some(MotionDrive { energy: 0.2 }));
+        assert!(calm.hit < 0.1, "gentle movement is not a flinch");
+    }
+
+    #[test]
+    fn motion_energy_is_clamped() {
+        let mut d = Drive::default();
+        d.update(0.01, 1.0, None, Some(MotionDrive { energy: 99.0 }));
+        assert!(d.thump <= 1.0 && d.hit <= 1.0);
+    }
+
+    #[test]
     fn reverse_time_does_not_fire_pulses() {
         let mut d = Drive::default();
-        d.update(0.01, 8.0, None);
+        d.update(0.01, 8.0, None, None);
         d.beat = 0.0;
         d.bar = 0.0;
         // Backspin drags us back past bar lines — no machine-gun pulses.
-        d.update(0.01, 5.0, None);
+        d.update(0.01, 5.0, None, None);
         assert!(d.beat < 0.01 && d.bar < 0.01);
     }
 }

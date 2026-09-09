@@ -654,7 +654,7 @@ mod tests {
     /// A drive with a kick on it, as of `beat`.
     fn hot(beat: f64) -> Drive {
         let mut d = Drive::default();
-        d.update(0.01, beat, None);
+        d.update(0.01, beat, None, None);
         d
     }
 
@@ -712,12 +712,12 @@ mod tests {
         // beat line at once and fires a pulse, which would land a false
         // peak on the first sample.
         for i in 0..=120 {
-            d.update(STEP * SEC_PER_BEAT, 3.0 + i as f64 * STEP, None);
+            d.update(STEP * SEC_PER_BEAT, 3.0 + i as f64 * STEP, None, None);
         }
         let mut peak = [(f64::NEG_INFINITY, 0.0f64); 3]; // (value, beat)
         for i in 0..=360 {
             let beat = 3.5 + i as f64 * STEP;
-            d.update(STEP * SEC_PER_BEAT, beat, None);
+            d.update(STEP * SEC_PER_BEAT, beat, None, None);
             for (rank, slot) in RIG.iter().zip(peak.iter_mut()) {
                 let v = ring_drive(&d, beat, rank.delay);
                 if v > slot.0 {

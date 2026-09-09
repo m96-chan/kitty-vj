@@ -500,7 +500,7 @@ mod tests {
     /// are actually exercised.
     fn hot() -> Drive {
         let mut d = Drive::default();
-        d.update(0.01, 4.0, None);
+        d.update(0.01, 4.0, None, None);
         d
     }
 

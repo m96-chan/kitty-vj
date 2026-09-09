@@ -428,7 +428,7 @@ mod tests {
     /// A drive with something on every input, as `pixparticles`' tests do.
     fn hot() -> Drive {
         let mut d = Drive::default();
-        d.update(0.01, 4.0, None);
+        d.update(0.01, 4.0, None, None);
         d
     }
 

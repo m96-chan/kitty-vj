@@ -726,7 +726,7 @@ mod tests {
     /// actually exercised.
     fn hot() -> Drive {
         let mut d = Drive::default();
-        d.update(0.01, 4.0, None);
+        d.update(0.01, 4.0, None, None);
         d
     }
 
@@ -900,8 +900,8 @@ mod tests {
         // The whole path agrees: a live drive with an onset on it is
         // wider than the same drive settled, at the same beat.
         let mut cold = Drive::default();
-        cold.update(0.01, 4.6, None);
-        cold.update(0.4, 4.9, None); // let the beat pulse decay away
+        cold.update(0.01, 4.6, None, None);
+        cold.update(0.4, 4.9, None, None); // let the beat pulse decay away
         let mut warm = cold;
         warm.hit = 1.0;
         assert!(cold.gbeat() < 0.01 && warm.hit * 0.85 > 0.8, "rig is wrong");

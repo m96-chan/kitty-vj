@@ -8,6 +8,7 @@ use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+mod cam;
 mod collapse;
 mod cube;
 mod imgdust;
@@ -18,6 +19,7 @@ mod sparks;
 mod text;
 mod tunnel;
 
+pub use cam::CamFx;
 pub use collapse::Collapse;
 pub use cube::Cube;
 pub use imgdust::ImgDust;

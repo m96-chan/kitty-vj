@@ -446,7 +446,7 @@ mod tests {
         let steps = (beats / 0.05).round() as i32;
         for _ in 0..steps {
             *beat += 0.05;
-            d.update(0.02, *beat, None);
+            d.update(0.02, *beat, None, None);
             f.update(0.02, d, portrait);
         }
     }

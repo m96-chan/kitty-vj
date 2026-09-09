@@ -322,7 +322,7 @@ mod tests {
     /// half a second later the pulse is gone.
     fn ctx(beat: f64, decay: f64) -> FrameCtx {
         let mut drive = Drive::default();
-        drive.update(decay, beat, None);
+        drive.update(decay, beat, None, None);
         FrameCtx {
             beat,
             phase: beat.rem_euclid(1.0),
