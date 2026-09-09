@@ -104,9 +104,15 @@
 //! **This adds.** Like every pixel-tier mode it is a saturating add into
 //! whatever is already in the framebuffer. It tests depth but does not
 //! write it, so it neither occludes itself nor cares about submission
-//! order; hand it a cleared depth buffer, or one already holding this
-//! frame's opaque geometry, and the wire will sit behind that geometry
-//! correctly.
+//! order — and it **clears the shared depth buffer on entry and owns
+//! the pass**, like every other mesh mode. The first contract here was
+//! "hand it a cleared buffer, or one holding this frame's opaque
+//! geometry, and the wire sits behind that geometry" — a nice idea that
+//! nobody upheld: the mixer shares one depth buffer across all units
+//! and only the solid modes cleared it, so a cube that stopped drawing
+//! minutes ago kept occluding the wire from stale depth — a black hole
+//! dead centre of the hero woofer. Cross-unit layering is the faders'
+//! job, not the z-buffer's.
 
 // Wired into the mixer separately; the entry points are dead until then.
 #![allow(dead_code)]
@@ -275,9 +281,9 @@ fn driver_rot(phase: f64, i: usize) -> Rot {
 /// WIRE — three tumbling wireframe woofers, and a sound-wave ring out of
 /// one of them on every beat.
 ///
-/// `depth` is tested but never written and never cleared: clear it
-/// yourself, or draw this after the opaque geometry it should hide
-/// behind.
+/// Clears `depth` on entry and owns the pass, like every mesh mode;
+/// tested during the draw but never written, so the wire neither
+/// occludes itself nor cares about submission order.
 pub fn wire(
     fb: &mut Framebuffer,
     depth: &mut DepthBuffer,
@@ -308,6 +314,10 @@ pub fn wire(
     let Some(mut ras) = Raster::new(fb, depth, cam) else {
         return;
     };
+    // Own the depth pass. The buffer is shared across every pixel unit
+    // and holds whatever the last solid mesh left in it — see the
+    // module docs for the black hole that testing against it drew.
+    ras.clear_depth();
 
     draw_drivers(&mut ras, scr, beat, d, &look);
 
@@ -1115,6 +1125,39 @@ mod tests {
         }
         let ms = t0.elapsed().as_secs_f64() * 1000.0 / N as f64;
         println!("wire: {ms:.3} ms/frame at {w}x{h}");
+    }
+
+    #[test]
+    fn a_ghost_from_a_past_frame_cannot_eat_the_wire() {
+        // The bug this guards: the depth buffer is shared across every
+        // pixel unit and wire never cleared it, so a solid mesh that
+        // stopped drawing minutes ago still occluded the additive wire
+        // where it used to stand — a black hole dead centre of the hero.
+        let d = hot();
+        let mut clean = rig(160, 120);
+        clean.fb.px.fill(0);
+        clean.db.clear();
+        wire(&mut clean.fb, &mut clean.db, 4.1, 1.0, &d, A, B);
+        let want = clean.fb.px.clone();
+
+        let mut dirty = rig(160, 120);
+        dirty.fb.px.fill(0);
+        dirty.db.clear();
+        {
+            let cam = Camera::matching(&dirty.fb);
+            let mut ras = Raster::new(&mut dirty.fb, &mut dirty.db, cam).unwrap();
+            let opts = DrawOpts::textured().with_cull(crate::raster::Cull::None);
+            let tri = [
+                Vertex::at(v3(-200.0, -200.0, -100.0)),
+                Vertex::at(v3(200.0, -200.0, -100.0)),
+                Vertex::at(v3(0.0, 260.0, -100.0)),
+            ];
+            ras.draw_tri(&tri, &opts, |_, _| Some((10, 10, 10)));
+        }
+        // The ghost's colour is long gone; only its depth remains.
+        dirty.fb.px.fill(0);
+        wire(&mut dirty.fb, &mut dirty.db, 4.1, 1.0, &d, A, B);
+        assert_eq!(dirty.fb.px, want, "stale depth changed the frame");
     }
 
     #[test]
