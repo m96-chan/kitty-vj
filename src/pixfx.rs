@@ -2,15 +2,16 @@
 //! writes a full RGB framebuffer as a pure function of beat time, so the
 //! determinism contract holds here too.
 
+use crate::drive::Drive;
 use crate::graphics::Framebuffer;
 use crate::pass::hsv;
 
 /// PLASMA — summed sine fields, palette-cycled on the beat. The canonical
 /// demoscene plasma, clocked.
-pub fn plasma(fb: &mut Framebuffer, beat: f64, intensity: f64) {
+pub fn plasma(fb: &mut Framebuffer, beat: f64, intensity: f64, d: &Drive) {
     let (w, h) = (fb.w as f64, fb.h as f64);
     let t = beat * 0.5;
-    let warp = 0.5 + 0.5 * intensity;
+    let warp = 0.5 + 0.5 * intensity + 0.15 * d.thump;
     for y in 0..fb.h {
         let fy = y as f64 / h;
         for x in 0..fb.w {
@@ -28,11 +29,13 @@ pub fn plasma(fb: &mut Framebuffer, beat: f64, intensity: f64) {
 }
 
 /// TUNNEL — a receding tube, angular stripes scrolling in beat time.
-pub fn tunnel(fb: &mut Framebuffer, beat: f64, intensity: f64) {
+pub fn tunnel(fb: &mut Framebuffer, beat: f64, intensity: f64, d: &Drive) {
     let (w, h) = (fb.w as f64, fb.h as f64);
     let (cx, cy) = (w / 2.0, h / 2.0);
     let scroll = beat * 0.5;
-    let flash = (1.0 - beat.rem_euclid(1.0)).powi(2);
+    // The grid pulse, not raw phase: these were the only pixel content
+    // ignoring the groove gate and the kick, by plumbing accident.
+    let flash = d.gbeat();
     for y in 0..fb.h {
         let dy = y as f64 - cy;
         for x in 0..fb.w {
@@ -50,14 +53,14 @@ pub fn tunnel(fb: &mut Framebuffer, beat: f64, intensity: f64) {
 
 /// STARFIELD — points streaming outward from center, closed-form so it's
 /// deterministic. Density and speed ride intensity.
-pub fn starfield(fb: &mut Framebuffer, beat: f64, intensity: f64) {
+pub fn starfield(fb: &mut Framebuffer, beat: f64, intensity: f64, d: &Drive) {
     for p in fb.px.iter_mut() {
         *p = 0;
     }
     let (w, h) = (fb.w as f64, fb.h as f64);
     let (cx, cy) = (w / 2.0, h / 2.0);
     let count = (200.0 + 600.0 * intensity) as u64;
-    let speed = 0.4 + 0.6 * intensity;
+    let speed = 0.4 + 0.6 * intensity + 0.3 * d.thump;
     for i in 0..count {
         let ang = crate::rng::unit_f64(crate::rng::hash3(i, 1, 0)) * std::f64::consts::TAU;
         let phase = crate::rng::unit_f64(crate::rng::hash3(i, 2, 0));
@@ -82,15 +85,16 @@ mod tests {
     fn plasma_is_deterministic() {
         let mut a = Framebuffer::new(32, 18);
         let mut b = Framebuffer::new(32, 18);
-        plasma(&mut a, 3.25, 0.7);
-        plasma(&mut b, 3.25, 0.7);
+        let d = Drive::default();
+        plasma(&mut a, 3.25, 0.7, &d);
+        plasma(&mut b, 3.25, 0.7, &d);
         assert_eq!(a.px, b.px);
     }
 
     #[test]
     fn plasma_fills_every_pixel() {
         let mut fb = Framebuffer::new(16, 16);
-        plasma(&mut fb, 1.0, 1.0);
+        plasma(&mut fb, 1.0, 1.0, &Drive::default());
         // Not all zero — something got written everywhere.
         assert!(fb.px.iter().any(|&v| v > 0));
     }

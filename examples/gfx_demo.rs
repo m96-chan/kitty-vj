@@ -48,7 +48,9 @@ fn main() {
     while start.elapsed().as_secs_f64() < 10.0 {
         let t0 = Instant::now();
         let beat = start.elapsed().as_secs_f64() * tempo / 60.0;
-        pixfx::plasma(&mut fb, beat, 0.8);
+        let mut d = drive::Drive::default();
+        d.update(1.0 / 30.0, beat, None, None);
+        pixfx::plasma(&mut fb, beat, 0.8, &d);
         if graphics::transmit_direct(&mut out, &fb, 1).is_err() {
             break;
         }

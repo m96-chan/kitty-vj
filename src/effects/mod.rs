@@ -38,6 +38,11 @@ pub struct FrameCtx {
     pub phase: f64,
     /// Phase within a 4-beat bar, [0, 4).
     pub bar_phase: f64,
+    /// Real time since the last frame, seconds. For the stateful pieces
+    /// an effect owns — the framing's focus easing — which were being
+    /// fed a made-up sixtieth of a second and so ran at the wrong rate
+    /// whenever the frame rate was not exactly 60.
+    pub dt: f64,
     /// Visual clock in seconds — wall time, not beat time. Effects whose
     /// original was written against a clock (a hue cycle per second, a
     /// slow camera drift) must read this, or they change speed with the

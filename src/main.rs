@@ -173,6 +173,8 @@ struct App {
     /// them change speed with the tempo. Frozen while the show holds,
     /// as the original's VT was frozen during silence.
     vt: f64,
+    /// Real time the last frame took, handed to effects that own state.
+    frame_dt: f64,
     /// Scene changes that had to fire off-grid. A set full of these
     /// means the clock is wrong, so it is worth seeing.
     escapes: u32,
@@ -289,6 +291,7 @@ impl App {
             bpm_window: (85, 170),
             scenes: scene::SceneDirector::new(scene::Style::Neon, 1),
             vt: 0.0,
+            frame_dt: 1.0 / 60.0,
             abcut: false,
             stutter: false,
             stutter_hold: None,
@@ -617,9 +620,9 @@ impl App {
         let acc_b = self.accent_b;
         let i = self.intensity;
         match kind {
-            units::Pix::Plasma => pixfx::plasma(&mut self.gfx_fb, beat, i),
-            units::Pix::Tunnel => pixfx::tunnel(&mut self.gfx_fb, beat, i),
-            units::Pix::Stars => pixfx::starfield(&mut self.gfx_fb, beat, i),
+            units::Pix::Plasma => pixfx::plasma(&mut self.gfx_fb, beat, i, &self.drive),
+            units::Pix::Tunnel => pixfx::tunnel(&mut self.gfx_fb, beat, i, &self.drive),
+            units::Pix::Stars => pixfx::starfield(&mut self.gfx_fb, beat, i, &self.drive),
             units::Pix::Cam => {
                 if let Some(img) = self.capture.borrow().as_ref().and_then(|c| c.latest()) {
                     source::draw_pixels(&mut self.gfx_fb, &img, self.drive.gbeat(), i, true);
@@ -1138,6 +1141,7 @@ impl App {
         let vbeat = self.vbeat();
         let ctx = FrameCtx {
             beat: vbeat,
+            dt: self.frame_dt,
             vt: self.vt,
             phase: vbeat.rem_euclid(1.0),
             bar_phase: vbeat.rem_euclid(4.0),
@@ -1678,6 +1682,7 @@ fn main() -> std::io::Result<()> {
         app.consume_ai();
         app.process_midi();
         let frame_dt = now.duration_since(prev_frame).as_secs_f64();
+        app.frame_dt = frame_dt;
         app.tick_jogs(frame_dt);
         app.tick_drive(frame_dt);
         app.tick_show(frame_dt);

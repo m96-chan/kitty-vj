@@ -169,7 +169,7 @@ impl Effect for PlateFx {
         // Framing resolves the fit; the camera only says where to look
         // and how hard to push. Contain is the case that needs the
         // framing's own scale — cover alone cannot express a letterbox.
-        self.framing.update(1.0 / 60.0, &ctx.drive, sh > sw);
+        self.framing.update(ctx.dt, &ctx.drive, sh > sw);
         let place = self.framing.place((sw, sh), (tw, th), cam);
         // One punch definition, shared with the pixel tier and the
         // camera — see source.rs. This is the value they all use.
