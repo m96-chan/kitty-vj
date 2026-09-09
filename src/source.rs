@@ -35,8 +35,9 @@ pub enum CellStyle {
 
 /// Where an image lands in the target, resolved once for both tiers.
 ///
-/// Cover fit with the beat punch the plates already use, so a camera
-/// reads as one more plate rather than as a special case.
+/// Cover fit, plus an optional camera offset so a plate's Ken Burns
+/// drift and a bare camera frame land through the same equation rather
+/// than through two that merely resemble each other.
 #[derive(Clone, Copy)]
 pub struct Fit {
     zoom: f64,
@@ -45,6 +46,9 @@ pub struct Fit {
     tw: f64,
     th: f64,
     mirror: bool,
+    /// Where in the source the target's centre lands, in source pixels.
+    drift_x: f64,
+    drift_y: f64,
 }
 
 impl Fit {
@@ -64,23 +68,65 @@ impl Fit {
             tw,
             th,
             mirror,
+            drift_x: 0.0,
+            drift_y: 0.0,
         })
+    }
+
+    /// Take a resolved placement instead of a bare cover fit — this is
+    /// how a plate's framing and camera reach the sampler.
+    pub fn placed(
+        src: (f64, f64),
+        target: (f64, f64),
+        scale: f64,
+        drift: (f64, f64),
+        mirror: bool,
+    ) -> Option<Self> {
+        let (sw, sh) = src;
+        let (tw, th) = target;
+        if sw < 1.0 || sh < 1.0 || tw < 1.0 || th < 1.0 || scale <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            zoom: scale,
+            sw,
+            sh,
+            tw,
+            th,
+            mirror,
+            drift_x: drift.0,
+            drift_y: drift.1,
+        })
+    }
+
+    /// The zoom this fit resolved to, for callers that shear or offset
+    /// in target space and need the same scale.
+    #[allow(dead_code)]
+    pub fn zoom(&self) -> f64 {
+        self.zoom
     }
 
     /// Sample the image at a point in target space.
     pub fn at(&self, img: &RgbImage, x: f64, y: f64) -> (u8, u8, u8) {
         let px = if self.mirror { self.tw - x } else { x };
-        let sx = ((px - self.tw / 2.0) / self.zoom + self.sw / 2.0).clamp(0.0, self.sw - 1.0);
-        let sy = ((y - self.th / 2.0) / self.zoom + self.sh / 2.0).clamp(0.0, self.sh - 1.0);
+        let sx = ((px - self.tw / 2.0) / self.zoom + self.sw / 2.0 + self.drift_x)
+            .clamp(0.0, self.sw - 1.0);
+        let sy = ((y - self.th / 2.0) / self.zoom + self.sh / 2.0 + self.drift_y)
+            .clamp(0.0, self.sh - 1.0);
         let p = img.get_pixel(sx as u32, sy as u32).0;
         (p[0], p[1], p[2])
     }
 }
 
-/// The beat punch both tiers apply. One definition, so a camera pulses
-/// identically whichever tier is drawing it.
+/// The beat punch every image source applies. One definition, so a
+/// picture pulses identically whichever tier is drawing it and whether
+/// it came from a file or a camera.
+///
+/// The depth is the plates' 0.10 rather than a rounder number: they were
+/// ported against that figure, and the camera had drifted to 0.08 by
+/// being written second.
 pub fn punch(gbeat: f64, intensity: f64) -> f64 {
-    1.0 + 0.08 * gbeat * (0.3 + 0.7 * intensity)
+    1.0 + 0.10 * gbeat * (0.3 + 0.7 * intensity)
 }
 
 /// Draw an image into the cell grid.
@@ -189,6 +235,38 @@ mod tests {
             };
             assert_eq!(px, (r, g, b), "tiers disagree at column {x}");
         }
+    }
+
+    #[test]
+    fn a_placement_and_a_cover_agree_when_there_is_no_camera() {
+        // The plate tier builds its fit from a resolved Placement while
+        // the pixel tier builds a bare cover. With no camera offset they
+        // must be the same equation — this is the assertion that would
+        // have caught the plate sampler drifting away from the camera's.
+        let im = img(64, 36);
+        let target = (40.0, 20.0);
+        let cover = Fit::cover((64.0, 36.0), target, 1.0, false).unwrap();
+        let placed = Fit::placed((64.0, 36.0), target, cover.zoom(), (0.0, 0.0), false).unwrap();
+        for x in 0..40 {
+            for y in 0..20 {
+                let (a, b) = (x as f64 + 0.5, y as f64 + 0.5);
+                assert_eq!(
+                    cover.at(&im, a, b),
+                    placed.at(&im, a, b),
+                    "the two construction paths disagree at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_punch_serves_every_image_source() {
+        // The bug this guards: a camera and a plate pulsing by different
+        // amounts because each had its own copy of the formula.
+        let a = punch(0.7, 0.6);
+        let b = crate::source::punch(0.7, 0.6);
+        assert_eq!(a, b);
+        assert!(punch(0.0, 1.0) == 1.0);
     }
 
     #[test]

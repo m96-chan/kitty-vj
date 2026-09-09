@@ -195,7 +195,7 @@ impl Shape {
     fn of(beat: f64, intensity: f64, d: &Drive) -> Self {
         // The grid pulse or a hard onset, whichever is louder — the
         // original's `react`.
-        let react = d.gbeat().max(d.hit * 0.85).clamp(0.0, 1.0);
+        let react = d.react().clamp(0.0, 1.0);
         let thump = d.thump.clamp(0.0, 1.0);
         let burst = d.gbar().clamp(0.0, 1.0).powi(2);
         let a = spin_angle(beat);

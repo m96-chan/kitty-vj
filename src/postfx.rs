@@ -72,10 +72,11 @@ fn wrapped_row(src: &Buffer, area: Rect, x: i32, y: u16) -> Cell {
 /// the 16th note instead. Bands then hold for a musical unit and change on
 /// one, which is what the effect looked like anyway.
 ///
-/// `gslice` is the trigger amount (the pad's own envelope, not a grid
-/// pulse) and gates the whole pass: at zero this is a no-op and costs
-/// nothing. Band height is 12-90 px and the shear ±70 px on the source
-/// canvas, both carried across as fractions.
+/// `gslice` is the trigger amount — today the caller passes a grid
+/// pulse, though a pad envelope would fit as well. It gates the whole
+/// pass: at zero this is a no-op and costs nothing. Band height is
+/// 12-90 px and the shear ±70 px on the source canvas, both carried
+/// across as fractions.
 pub fn slice(buf: &mut Buffer, area: Rect, beat: f64, gslice: f64, intensity: f64) {
     if gslice <= EPS || intensity <= EPS || area.width < 2 || area.height == 0 {
         return;

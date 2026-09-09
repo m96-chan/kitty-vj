@@ -38,6 +38,11 @@ pub struct FrameCtx {
     pub phase: f64,
     /// Phase within a 4-beat bar, [0, 4).
     pub bar_phase: f64,
+    /// Visual clock in seconds — wall time, not beat time. Effects whose
+    /// original was written against a clock (a hue cycle per second, a
+    /// slow camera drift) must read this, or they change speed with the
+    /// tempo.
+    pub vt: f64,
     /// Global intensity fader, [0, 1]. Keyboard now, MIDI CC later.
     pub intensity: f64,
     /// Drive signals — grid pulses, kick measure, onset flinch. Effects

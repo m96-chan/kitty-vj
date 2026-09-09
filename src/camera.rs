@@ -113,10 +113,13 @@ impl Modulator for PunchIn {
         "PUNCHIN"
     }
 
-    fn cam(&self, t: f64, d: &Drive) -> Cam {
+    fn cam(&self, _t: f64, d: &Drive) -> Cam {
         // Which region depends on which phrase we are in, so the dive
-        // lands somewhere new each time without storing anything.
-        let phrase = (t / 8.0).floor() as u64;
+        // lands somewhere new each time without storing anything. The
+        // phrase comes from the grid, not the clock: sixteen beats is a
+        // phrase whatever the tempo, and guessing from seconds only
+        // agrees with the pulses at one BPM.
+        let phrase = d.beat_index().div_euclid(16) as u64;
         let r = |k: u64| unit_f64(hash3(self.seed, phrase, k));
         let depth = d.gphrase();
         Cam {
@@ -177,11 +180,26 @@ mod tests {
 
     #[test]
     fn punchin_picks_a_new_region_each_phrase() {
+        // A phrase is sixteen beats, so the region must change with the
+        // beat index and not with elapsed seconds.
         let p = PunchIn::new(5);
-        let d = Drive::default();
-        let a = p.cam(1.0, &d);
-        let b = p.cam(9.0, &d); // next phrase
+        let mut d = Drive::default();
+        d.update(0.01, 1.0, None, None);
+        let a = p.cam(0.0, &d);
+        let mut e = Drive::default();
+        e.update(0.01, 17.0, None, None); // next phrase
+        let b = p.cam(0.0, &e);
         assert!(a.fx != b.fx || a.fy != b.fy);
+    }
+
+    #[test]
+    fn punchin_holds_its_region_within_a_phrase() {
+        let p = PunchIn::new(5);
+        let mut a = Drive::default();
+        a.update(0.01, 1.0, None, None);
+        let mut b = Drive::default();
+        b.update(0.01, 15.0, None, None); // same phrase
+        assert_eq!(p.cam(0.0, &a).fx, p.cam(99.0, &b).fx);
     }
 
     #[test]

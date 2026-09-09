@@ -113,6 +113,7 @@ mod tests {
     fn ctx() -> FrameCtx {
         FrameCtx {
             beat: 1.0,
+            vt: 0.0,
             phase: 0.0,
             bar_phase: 1.0,
             intensity: 0.5,

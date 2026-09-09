@@ -325,6 +325,7 @@ mod tests {
         drive.update(decay, beat, None, None);
         FrameCtx {
             beat,
+            vt: 0.0,
             phase: beat.rem_euclid(1.0),
             bar_phase: beat.rem_euclid(4.0),
             intensity: 0.7,

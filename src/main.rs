@@ -224,6 +224,12 @@ struct App {
     /// Held frame for the stutter, and the subdivision it was taken on.
     stutter_hold: Option<ratatui::buffer::Buffer>,
     stutter_tick: i64,
+    /// The visual clock, in seconds. Distinct from beat time on purpose:
+    /// a hue cycle at 22 deg/s and a 20-second Ken Burns move are
+    /// wall-clock gestures, and making them ride the beat would have
+    /// them change speed with the tempo. Frozen while the show holds,
+    /// as the original's VT was frozen during silence.
+    vt: f64,
     /// Scene changes that had to fire off-grid. A set full of these
     /// means the clock is wrong, so it is worth seeing.
     escapes: u32,
@@ -335,6 +341,7 @@ impl App {
             audio_err: None,
             bpm_window: (85, 170),
             scenes: scene::SceneDirector::new(scene::Style::Neon, 1),
+            vt: 0.0,
             abcut: false,
             stutter: false,
             stutter_hold: None,
@@ -683,6 +690,9 @@ impl App {
             1.0
         };
         self.show_state = self.show.update(dt, loud);
+        if !self.show_state.hold {
+            self.vt += dt;
+        }
         // Rotation is expressed in seconds over there, so it has to
         // follow the tempo here or a fast set would rotate twice as often.
         self.scenes.set_tempo(self.clock.tempo());
@@ -1042,7 +1052,7 @@ impl App {
                 (255, 255, 255),
             );
         }
-        let t = beat * 60.0 / self.clock.tempo().max(1.0);
+        let t = self.vt;
         match PIX_POSTS[self.pix_post].1 {
             PixPost::None => {}
             PixPost::Warp => pixpost::warp(&mut self.gfx_fb, &self.drive, t, self.intensity),
@@ -1077,6 +1087,7 @@ impl App {
         let vbeat = self.triggers.warp_beat(beat) + self.jog_offset();
         let ctx = FrameCtx {
             beat: vbeat,
+            vt: self.vt,
             phase: vbeat.rem_euclid(1.0),
             bar_phase: vbeat.rem_euclid(4.0),
             intensity: self.intensity,
@@ -1153,7 +1164,7 @@ impl App {
                         // knob; the pipeline doesn't care which.
                         let cctx = pass::CellCtx {
                             drive: &self.drive,
-                            t: vbeat,
+                            t: self.vt,
                             x,
                             y,
                             w: stage.width,
@@ -1242,10 +1253,15 @@ impl App {
             }
         }
 
-        // STUTTER — in the first two beats of a phrase the pipeline is
-        // re-run at only two subdivisions per beat and the held frame is
-        // re-blitted otherwise. Not running the pipeline is the point:
-        // the frame rate goes up while it holds.
+        // STUTTER — in the first two beats of a phrase the picture is
+        // re-taken at only two subdivisions per beat and the held frame
+        // is re-blitted otherwise.
+        //
+        // Over there this also skipped the pipeline, so the frame rate
+        // went up while it held. Here the mix has already run by the
+        // time we get to it, so the hold is only visual — the saving is
+        // not real, and claiming it would be a lie. Moving the check
+        // above the mix would earn it back.
         if self.stutter && self.drive.groove > 0.5 {
             let in_window = vbeat.rem_euclid(16.0) < 2.0;
             let tick = (vbeat * 2.0).floor() as i64;
@@ -1328,7 +1344,7 @@ impl App {
         let look_seg = {
             let probe = pass::CellCtx {
                 drive: &self.drive,
-                t: beat,
+                t: self.vt,
                 x: 0,
                 y: 0,
                 w: stage.width,

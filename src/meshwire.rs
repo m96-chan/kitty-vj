@@ -260,7 +260,7 @@ pub fn wire(
     if fb.w == 0 || fb.h == 0 || !beat.is_finite() {
         return;
     }
-    let react = d.gbeat().max(d.hit * 0.85);
+    let react = d.react();
     let look = Look {
         // The original's `uWidth`, verbatim.
         width_px: 0.8 + 0.8 * react,

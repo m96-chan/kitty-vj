@@ -156,8 +156,9 @@ impl Effect for PlateFx {
             use crate::camera::Modulator;
             // Two modulators compose by multiplying zoom and taking the
             // dive's focus while it is actually diving.
-            let base = self.ken.cam(ctx.beat, &ctx.drive);
-            let dive = self.punch.cam(ctx.beat, &ctx.drive);
+            // Seconds: these are wall-clock gestures, not beat ones.
+            let base = self.ken.cam(ctx.vt, &ctx.drive);
+            let dive = self.punch.cam(ctx.vt, &ctx.drive);
             let k = (dive.zoom - 1.0).clamp(0.0, 1.0);
             crate::camera::Cam {
                 zoom: base.zoom * dive.zoom,
@@ -170,7 +171,9 @@ impl Effect for PlateFx {
         // framing's own scale — cover alone cannot express a letterbox.
         self.framing.update(1.0 / 60.0, &ctx.drive, sh > sw);
         let place = self.framing.place((sw, sh), (tw, th), cam);
-        let punch = 1.0 + 0.10 * ctx.drive.gbeat() * (0.3 + 0.7 * ctx.intensity);
+        // One punch definition, shared with the pixel tier and the
+        // camera — see source.rs. This is the value they all use.
+        let punch = crate::source::punch(ctx.drive.gbeat(), ctx.intensity);
         let zoom = place.scale * punch;
         let drift_x = place.drift_x;
         let drift_y = place.drift_y;
@@ -197,12 +200,23 @@ impl Effect for PlateFx {
         // that also moved the camera reads as two separate events.
         let old = self.outgoing.map(|i| &self.plates[i].img);
 
+        // The sampler is source::Fit, the same one the pixel tier and the
+        // camera use. Coordinates arrive centred here, so the fit is
+        // built around a centred target.
+        let fit_for = |im: &image::RgbImage| {
+            crate::source::Fit::placed(
+                (im.width() as f64, im.height() as f64),
+                (tw, th),
+                zoom,
+                (drift_x, drift_y),
+                false,
+            )
+        };
         let sample_from = |im: &image::RgbImage, x: f64, y: f64| -> (u8, u8, u8) {
-            let (iw, ih) = (im.width() as f64, im.height() as f64);
-            let sx = (x / zoom + iw / 2.0 + drift_x).clamp(0.0, iw - 1.0) as u32;
-            let sy = (y / zoom + ih / 2.0 + drift_y).clamp(0.0, ih - 1.0) as u32;
-            let p = im.get_pixel(sx, sy).0;
-            (p[0], p[1], p[2])
+            match fit_for(im) {
+                Some(f) => f.at(im, x + tw / 2.0, y + th / 2.0),
+                None => (0, 0, 0),
+            }
         };
         let sample = |x: f64, y: f64| -> (u8, u8, u8) { sample_from(img, x, y) };
 

@@ -114,6 +114,19 @@ impl Drive {
         self.phrase * self.gv()
     }
 
+    /// The beat the grid is currently on. Exposed because a phrase is
+    /// sixteen of these, and anything that wants "which phrase" has to
+    /// agree with the pulses rather than guess from a clock.
+    pub fn beat_index(&self) -> i64 {
+        self.last_beat
+    }
+
+    /// The reaction term the mesh modes all derive the same way: the
+    /// grid pulse, or an onset if that is louder.
+    pub fn react(&self) -> f64 {
+        self.gbeat().max(self.hit * 0.85)
+    }
+
     /// Groove mapped so a dead breakdown still leaves a floor of motion.
     pub fn gv(&self) -> f64 {
         0.22 + 0.78 * self.groove.clamp(0.0, 1.0)

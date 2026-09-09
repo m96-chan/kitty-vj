@@ -26,8 +26,9 @@
 //! rotated-bounding-box maths are ported and tested anyway, so that a
 //! future pixel-tier plate can set an angle and have the fit stay whole.
 
-// Nothing wires this module into a render path yet — the scene picks the
-// fit, and that lands separately. Delete this the moment it does, so the
+// PLATE calls place() and the scene picks the fit, so most of this is
+// live. The allow stays only for the Contain/rotation paths the cell
+// grid does not use yet; narrow it rather than widen it, so the
 // usual dead-code pressure applies again.
 #![allow(dead_code)]
 

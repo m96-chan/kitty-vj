@@ -295,7 +295,7 @@ pub fn speaker(
 /// *amplitude*, which is exact for everything on the grid and an
 /// approximation for anything that is not.
 fn ring_drive(d: &Drive, beat: f64, delay: f64) -> f64 {
-    let react = d.gbeat().max(d.hit * 0.85);
+    let react = d.react();
     let live = (1.15 * d.thump + 0.85 * react + 0.5 * d.hit).clamp(0.0, DRIVE_MAX);
     if !delay.is_finite() || delay <= 0.0 || !beat.is_finite() {
         return live;
