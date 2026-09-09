@@ -1,8 +1,13 @@
 //! MESHWIRE — EasyPngVJ's `wire` mode on the software rasteriser.
 //!
-//! Over there this was three tumbling driver shapes drawn as glowing
-//! wireframes, with a shockwave ring punched out of one of them on every
-//! beat. The wireframe was not `THREE.WireframeGeometry` and not
+//! Over there this was **the same woofer as the speaker wall**, drawn as
+//! its own edges and left free to tumble — "the basket, cone and magnet
+//! all come round in turn" — with a sound-wave ring fired out of a
+//! driver's mouth on every beat, along whatever axis its cone happened
+//! to be pointing down. The port first stood in a ball, a box and a
+//! diamond for the woofers; the user caught it — the tumbling speaker
+//! spitting waves IS the mode. The wireframe was not
+//! `THREE.WireframeGeometry` and not
 //! `gl_LineWidth`: the mesh was re-expanded so that every corner carried a
 //! **barycentric coordinate**, and the fragment shader lit a pixel by how
 //! close its interpolated barycentric was to zero. That is the whole
@@ -154,23 +159,44 @@ struct Driver {
     rate: Vec3,
 }
 
+/// The original's rig, verbatim: a hero woofer front and centre, two
+/// more hanging off in the wings.
 const DRIVERS: [Driver; 3] = [
     Driver {
-        pos: v3(-215.0, 55.0, -60.0),
-        scale: 62.0,
-        rate: v3(0.37, 0.53, 0.21),
+        pos: v3(0.0, 0.0, -380.0),
+        scale: 220.0,
+        rate: v3(0.42, 0.63, 0.17),
     },
     Driver {
-        pos: v3(15.0, -70.0, 40.0),
-        scale: 48.0,
-        rate: v3(-0.61, 0.29, 0.44),
+        pos: v3(-640.0, 170.0, -880.0),
+        scale: 155.0,
+        rate: v3(-0.71, 0.38, -0.24),
     },
     Driver {
-        pos: v3(225.0, 80.0, -140.0),
-        scale: 74.0,
-        rate: v3(0.24, -0.68, 0.33),
+        pos: v3(620.0, -190.0, -840.0),
+        scale: 165.0,
+        rate: v3(0.29, -0.83, 0.31),
     },
 ];
+
+/// The original rolled each driver's starting orientation at load —
+/// `rnd(0, 6.3)` per axis, different every launch. A deterministic
+/// instrument pins the roll: three fixed poses in the same range,
+/// chosen so no driver starts face-on or edge-on.
+const PHASE: [Vec3; 3] = [
+    v3(2.39, 5.11, 0.83),
+    v3(0.57, 3.71, 4.99),
+    v3(4.23, 1.31, 2.77),
+];
+
+/// Wire tessellation around each woofer. Sparser than the lit wall on
+/// purpose — a wireframe reads by its lines, and hero-density lines
+/// melt into fill.
+const WIRE_SEG: [usize; 3] = [16, 12, 12];
+
+/// Cone excursion per unit drive — the original's `aPunch` coefficient,
+/// 0.22 where the lit wall uses 0.20.
+const PUNCH: f64 = 0.22;
 
 /// The original's `spin = 0.45 + 2.4*gbar + 1.6*react`, **integrated**.
 ///
@@ -232,14 +258,15 @@ fn pulse_integral(beat: f64, period: f64, tau: f64) -> f64 {
 /// nothing for a quaternion to protect.
 fn driver_rot(phase: f64, i: usize) -> Rot {
     let r = DRIVERS[i].rate;
-    Rot::from_euler(phase * r.y, phase * r.x, phase * r.z)
+    let p = PHASE[i];
+    Rot::from_euler(phase * r.y + p.y, phase * r.x + p.x, phase * r.z + p.z)
 }
 
 // ---------------------------------------------------------------------
 // public entry point
 // ---------------------------------------------------------------------
 
-/// WIRE — three tumbling wireframe solids, and a shockwave ring out of
+/// WIRE — three tumbling wireframe woofers, and a sound-wave ring out of
 /// one of them on every beat.
 ///
 /// `depth` is tested but never written and never cleared: clear it
@@ -276,7 +303,7 @@ pub fn wire(
         return;
     };
 
-    draw_drivers(&mut ras, scr, beat, &look);
+    draw_drivers(&mut ras, scr, beat, d, &look);
 
     // The scan. Every beat line behind us within the pool depth fired a
     // blast; `blast_state` decides which are still alive.
@@ -296,17 +323,24 @@ struct Look {
     cb: (u8, u8, u8),
 }
 
-fn draw_drivers(ras: &mut Raster, scr: Screen, beat: f64, look: &Look) {
+/// The three woofers, tumbling. "The same woofer" as the lit wall, per
+/// the original — its cone punched by the live drive, the geometry
+/// rebuilt per frame exactly as the wall rebuilds its ranks. The punch
+/// also lifts the glow (the original's `1.7 * |vPunch|` term), so a
+/// kick reads as the cone lunging *and* flaring.
+fn draw_drivers(ras: &mut Raster, scr: Screen, beat: f64, d: &Drive, look: &Look) {
     let phase = spin_phase(beat);
-    let g = geometry();
-    for (i, mesh) in g.drivers.iter().enumerate() {
-        let d = &DRIVERS[i];
+    let drive = crate::meshspeaker::ring_drive(d, beat, 0.0);
+    let punch = PUNCH * drive;
+    let level = look.level * (1.0 + 1.5 * punch);
+    for (i, drv) in DRIVERS.iter().enumerate() {
+        let mesh = crate::meshspeaker::woofer(punch, WIRE_SEG[i]);
         let xf = Transform::IDENTITY
             .with_rot(driver_rot(phase, i))
-            .with_uniform_scale(d.scale)
-            .with_translation(d.pos);
-        let col = scaled(mix(look.ca, look.cb, i as f64 * 0.5), look.level);
-        draw_wire_mesh(ras, mesh, &xf, scr, look.width_px, col);
+            .with_uniform_scale(drv.scale * (1.0 + 0.10 * drive))
+            .with_translation(drv.pos);
+        let col = scaled(mix(look.ca, look.cb, i as f64 * 0.5), level);
+        draw_wire_mesh(ras, &mesh, &xf, scr, look.width_px, col);
     }
 }
 
@@ -587,105 +621,21 @@ fn scaled(c: (f64, f64, f64), k: f64) -> (f64, f64, f64) {
 // geometry
 // ---------------------------------------------------------------------
 
-/// The three driver solids and the blast ring, built once.
+/// The blast ring, built once. The woofers are NOT here: their cone is
+/// punched by the live drive, so their geometry changes per frame and
+/// is rebuilt then, exactly as the lit wall rebuilds its ranks.
 ///
-/// A `OnceLock` rather than a rebuild per frame: the geometry is
-/// constant, and four `Vec` allocations sixty times a second is exactly
-/// the kind of thing the rasteriser's budget note is about. It is not
-/// simulation state — nothing observable depends on whether it has been
-/// initialised — so it does not cost the determinism contract anything.
+/// A `OnceLock` rather than a rebuild per frame: the ring is constant,
+/// and it is not simulation state — nothing observable depends on
+/// whether it has been initialised — so it does not cost the
+/// determinism contract anything.
 struct Geometry {
-    drivers: [Mesh; 3],
     ring: Mesh,
 }
 
 fn geometry() -> &'static Geometry {
     static G: OnceLock<Geometry> = OnceLock::new();
-    G.get_or_init(|| Geometry {
-        // A ball, a diamond and a box: three silhouettes that stay
-        // distinguishable while tumbling, 40 triangles between them.
-        drivers: [icosahedron(), Mesh::cube(), octahedron()],
-        ring: ring_mesh(),
-    })
-}
-
-/// Eight faces on six corners. `Mesh::tri` gives each face the canonical
-/// `[1,0,0] [0,1,0] [0,0,1]`, so all three of its edges light — correct
-/// here, because every edge of a triangulated solid is a real edge.
-fn octahedron() -> Mesh {
-    const P: [Vec3; 6] = [
-        v3(1.0, 0.0, 0.0),
-        v3(-1.0, 0.0, 0.0),
-        v3(0.0, 1.0, 0.0),
-        v3(0.0, -1.0, 0.0),
-        v3(0.0, 0.0, 1.0),
-        v3(0.0, 0.0, -1.0),
-    ];
-    const F: [[usize; 3]; 8] = [
-        [0, 2, 4],
-        [2, 1, 4],
-        [1, 3, 4],
-        [3, 0, 4],
-        [2, 0, 5],
-        [1, 2, 5],
-        [3, 1, 5],
-        [0, 3, 5],
-    ];
-    let mut m = Mesh::new();
-    for [a, b, c] in F {
-        m.tri(Vertex::at(P[a]), Vertex::at(P[b]), Vertex::at(P[c]));
-    }
-    m
-}
-
-/// Twenty faces on twelve corners, on the unit sphere.
-fn icosahedron() -> Mesh {
-    let t = (1.0 + 5.0f64.sqrt()) * 0.5;
-    let p = [
-        v3(-1.0, t, 0.0),
-        v3(1.0, t, 0.0),
-        v3(-1.0, -t, 0.0),
-        v3(1.0, -t, 0.0),
-        v3(0.0, -1.0, t),
-        v3(0.0, 1.0, t),
-        v3(0.0, -1.0, -t),
-        v3(0.0, 1.0, -t),
-        v3(t, 0.0, -1.0),
-        v3(t, 0.0, 1.0),
-        v3(-t, 0.0, -1.0),
-        v3(-t, 0.0, 1.0),
-    ];
-    const F: [[usize; 3]; 20] = [
-        [0, 11, 5],
-        [0, 5, 1],
-        [0, 1, 7],
-        [0, 7, 10],
-        [0, 10, 11],
-        [1, 5, 9],
-        [5, 11, 4],
-        [11, 10, 2],
-        [10, 7, 6],
-        [7, 1, 8],
-        [3, 9, 4],
-        [3, 4, 2],
-        [3, 2, 6],
-        [3, 6, 8],
-        [3, 8, 9],
-        [4, 9, 5],
-        [2, 4, 11],
-        [6, 2, 10],
-        [8, 6, 7],
-        [9, 8, 1],
-    ];
-    let mut m = Mesh::new();
-    for [a, b, c] in F {
-        m.tri(
-            Vertex::at(p[a].normalized()),
-            Vertex::at(p[b].normalized()),
-            Vertex::at(p[c].normalized()),
-        );
-    }
-    m
+    G.get_or_init(|| Geometry { ring: ring_mesh() })
 }
 
 /// The blast ring: a closed annulus in the local XY plane, so its axis is
@@ -893,7 +843,9 @@ mod tests {
             };
             {
                 let mut ras = Raster::new(&mut r.fb, &mut r.db, cam).unwrap();
-                draw_drivers(&mut ras, scr, 4.2, &look(w));
+                // A settled drive, so the width under test is the only
+                // thing moving between the two draws.
+                draw_drivers(&mut ras, scr, 4.2, &Drive::default(), &look(w));
             }
             r.lit()
         };
@@ -1022,13 +974,21 @@ mod tests {
 
     #[test]
     fn geometry_stays_inside_the_budget() {
+        // The drivers are real woofers now; the budget moves with the
+        // wire tessellation table, not with a hardcoded count.
+        let driver_tris: usize = WIRE_SEG
+            .iter()
+            .map(|&s| crate::meshspeaker::woofer(0.0, s).tris.len())
+            .sum();
+        assert!(
+            (300..1200).contains(&driver_tris),
+            "driver triangle count {driver_tris} left its band"
+        );
         let g = geometry();
-        let driver_tris: usize = g.drivers.iter().map(|m| m.tris.len()).sum();
-        assert_eq!(driver_tris, 40, "driver triangle count moved");
         assert_eq!(g.ring.tris.len(), RING_SEGS * 2);
         // Worst case a frame can reach: every pool slot alive at once.
         let worst = driver_tris + BLAST_POOL as usize * g.ring.tris.len();
-        assert!(worst < 620, "worst-case triangle count is {worst}");
+        assert!(worst < 1800, "worst-case triangle count is {worst}");
         // What it actually reaches at the reference tempo.
         let alive = (0..BLAST_POOL)
             .filter(|k| blast_state(20 - k, 20.4).is_some())

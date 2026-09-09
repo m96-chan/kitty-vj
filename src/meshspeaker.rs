@@ -361,7 +361,7 @@ pub fn speaker_wire(
 /// *shape* at the delayed instant and the live drive supplies its
 /// *amplitude*, which is exact for everything on the grid and an
 /// approximation for anything that is not.
-fn ring_drive(d: &Drive, beat: f64, delay: f64) -> f64 {
+pub(crate) fn ring_drive(d: &Drive, beat: f64, delay: f64) -> f64 {
     let react = d.react();
     let live = (1.15 * d.thump + 0.85 * react + 0.5 * d.hit).clamp(0.0, DRIVE_MAX);
     if !delay.is_finite() || delay <= 0.0 || !beat.is_finite() {
@@ -520,7 +520,11 @@ fn smooths(a: (f64, f64), b: (f64, f64)) -> bool {
 /// in this mode is a function of — and `uv.y` the position along the
 /// cross-section, which the shading does not read but which comes free
 /// once the pair is interpolated.
-fn woofer(punch: f64, seg: usize) -> Mesh {
+///
+/// `pub(crate)`: over there the wire mode drew "the same woofer" as its
+/// own edges — one driver, two materials — so the wire modes here build
+/// theirs from this function rather than growing a second speaker.
+pub(crate) fn woofer(punch: f64, seg: usize) -> Mesh {
     let seg = seg.clamp(6, MAX_SEG);
     let p = profile(punch);
     let n = band_normals(&p);
