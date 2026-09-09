@@ -547,6 +547,12 @@ pub struct SceneDirector {
     next_rotation: f64,
     escape_beats: f64,
     rotate_beats: f64,
+    /// Whether the rotation timer may queue changes on its own. Off
+    /// while a controller is connected: rotation is the autopilot, and
+    /// an operator holding four faders IS the scene change — a timer
+    /// yanking the cast out from under a mix reads as a malfunction,
+    /// not a decision. Manual and track-change requests are unaffected.
+    auto: bool,
 }
 
 impl SceneDirector {
@@ -562,6 +568,7 @@ impl SceneDirector {
             next_rotation: 0.0,
             escape_beats: ESCAPE_SECS * REF_TEMPO / 60.0,
             rotate_beats: ROTATE_SECS * REF_TEMPO / 60.0,
+            auto: true,
         };
         d.schedule_rotation(0.0);
         d
@@ -618,6 +625,25 @@ impl SceneDirector {
         self.pending.as_ref().map(|p| p.reason)
     }
 
+    /// Hand the rotation to the timer (true) or to the operator
+    /// (false). Driven by whether a controller is connected, so
+    /// unplugging mid-set falls back to autopilot on its own. Coming
+    /// back to auto rearms the timer from now — a timer that expired
+    /// while hands were on must not fire the moment they let go.
+    pub fn set_auto(&mut self, on: bool) {
+        if on == self.auto {
+            return;
+        }
+        self.auto = on;
+        if on {
+            self.schedule_rotation(self.last_beat);
+        }
+    }
+
+    pub fn auto(&self) -> bool {
+        self.auto
+    }
+
     /// Queue a change. Never fires here — see the module note on why the
     /// bar line is worth waiting for. A second request while one is
     /// queued upgrades the reason (a track change outranks a rotation)
@@ -656,7 +682,7 @@ impl SceneDirector {
             None
         };
 
-        if self.pending.is_none() && beat >= self.next_rotation {
+        if self.auto && self.pending.is_none() && beat >= self.next_rotation {
             self.request(ChangeReason::Rotation);
         }
 
@@ -1003,6 +1029,39 @@ mod tests {
         let c = d.update(next_bar + 0.01).expect("rotation should fire");
         assert_eq!(c.length, Length::Short);
         assert!(d.next_rotation() > next_bar, "the timer should rearm");
+    }
+
+    #[test]
+    fn with_hands_on_the_faders_the_timer_stays_quiet() {
+        // A connected controller turns rotation off: the operator is
+        // the scene change. Manual requests still land.
+        let mut d = director();
+        d.set_auto(false);
+        let due = d.next_rotation();
+        let mut b = 0.0;
+        while b < due + 64.0 {
+            b += 0.5;
+            assert!(d.update(b).is_none(), "rotated with auto off at {b}");
+        }
+        d.request(ChangeReason::Manual);
+        let next_bar = (b / BAR).floor() * BAR + BAR;
+        assert!(d.update(next_bar + 0.1).is_some(), "manual must still fire");
+    }
+
+    #[test]
+    fn coming_back_to_auto_rearms_instead_of_firing() {
+        // The timer expired while hands were on; letting go must not
+        // fire a change that instant.
+        let mut d = director();
+        d.set_auto(false);
+        let due = d.next_rotation();
+        let b = due + 32.0;
+        d.update(b);
+        d.set_auto(true);
+        assert!(d.next_rotation() > b, "the timer must rearm from now");
+        assert!(d.update(b + 0.1).is_none());
+        assert!(d.pending().is_none());
+        assert!(d.auto());
     }
 
     #[test]

@@ -958,6 +958,10 @@ impl App {
         // Rotation is expressed in seconds over there, so it has to
         // follow the tempo here or a fast set would rotate twice as often.
         self.scenes.set_tempo(self.clock.tempo());
+        // With a controller connected the faders are the scene change;
+        // the rotation timer is autopilot for when there isn't one.
+        // Hot-plug both ways: unplugging falls back to autopilot.
+        self.scenes.set_auto(!self.midi.connected());
         // Automatic scene rotation is suspended outside the live stage,
         // exactly as over there — nothing may interrupt an intro.
         if self.show.is_live()
@@ -1722,6 +1726,11 @@ impl App {
                 s.push_str(&format!("{} ", CELL_POSTS[self.cell_post].0));
             }
             s.push_str(&format!("{} ", self.scenes.scene().hud()));
+            if !self.scenes.auto() {
+                // Rotation handed to the operator — worth a word, or a
+                // quiet rig at a controller-less rehearsal looks broken.
+                s.push_str("MAN ");
+            }
             if !self.show.is_live() {
                 s.push_str(&format!("[{}] ", self.show.stage().name()));
             }
