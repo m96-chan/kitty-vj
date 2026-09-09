@@ -1432,51 +1432,88 @@ impl App {
         // Only the cell-medium parts enter the lottery — a combo brings
         // its cell parts here and its pixel parts to render_pixels, at
         // fader × share each. Pixel parts land under the cells instead.
-        // (channel, effect, gain), channels bottom to top.
-        let mut contrib: Vec<(usize, usize, f64)> = Vec::new();
-        for i in 0..CHANNELS {
-            let level = self.channels[i].level;
-            if level <= 0.004 {
-                continue;
-            }
-            each_part(&self.combos, self.channels[i].slot, |u, w| {
-                if let units::Unit::Cell(e) = u {
-                    contrib.push((i, e, level * w));
-                }
-            });
-        }
-        // Four channels of eight-part combos at most — the lottery's
-        // contender array is sized against this.
-        contrib.truncate(CHANNELS * combo::MAX_PARTS);
-        let need = contrib.len().max(1);
-        if self.scratch.len() < need || self.scratch[0].area != stage {
-            self.scratch = (0..need)
+        // Within a channel a recipe is LAYERS, not a raffle: cell parts
+        // paint bottom to top into one picture, a later part's
+        // untouched cells letting the earlier ones show through, and a
+        // part's share thinning its coverage by a fixed per-cell hash.
+        // Running the parts through the lottery instead was what
+        // shredded stacked cell effects row by row — the lottery is the
+        // fader law BETWEEN channels, and stays exactly that.
+        if self.scratch.len() != CHANNELS + 1 || self.scratch[0].area != stage {
+            self.scratch = (0..CHANNELS + 1)
                 .map(|_| ratatui::buffer::Buffer::empty(stage))
                 .collect();
         }
-        // One scratch per contribution, not per channel: two parts of
-        // one combo need two buffers.
-        for (k, &(_, e, _)) in contrib.iter().enumerate() {
-            self.scratch[k].reset();
-            self.effects[e].render(&mut self.scratch[k], stage, &ctx);
+        let mut cell_live: Vec<usize> = Vec::new();
+        {
+            // The spare buffer holds one part while it is dithered in.
+            let (chans, tmp) = self.scratch.split_at_mut(CHANNELS);
+            let tmp = &mut tmp[0];
+            for (i, chan) in chans.iter_mut().enumerate() {
+                if self.channels[i].level <= 0.004 {
+                    continue;
+                }
+                let mut parts: Vec<(usize, f64)> = Vec::new();
+                each_part(&self.combos, self.channels[i].slot, |u, w| {
+                    if let units::Unit::Cell(e) = u {
+                        parts.push((e, w));
+                    }
+                });
+                if parts.is_empty() {
+                    continue;
+                }
+                cell_live.push(i);
+                chan.reset();
+                for (p, &(e, w)) in parts.iter().enumerate() {
+                    if p == 0 && w >= 0.999 {
+                        // The common case — a base unit, or a recipe's
+                        // full-coverage ground — renders straight in.
+                        self.effects[e].render(chan, stage, &ctx);
+                        continue;
+                    }
+                    tmp.reset();
+                    self.effects[e].render(tmp, stage, &ctx);
+                    for y in 0..stage.height {
+                        for x in 0..stage.width {
+                            let (ax, ay) = (stage.x + x, stage.y + y);
+                            let c = &tmp[(ax, ay)];
+                            if c.symbol() == " " && c.bg == Color::Reset {
+                                continue; // untouched = transparent
+                            }
+                            // Coverage dither: fixed salt per layer, so
+                            // the thinning is stable frame to frame.
+                            if w < 0.999
+                                && rng::unit_f64(rng::hash3(
+                                    x as u64,
+                                    y as u64,
+                                    700 + p as u64,
+                                )) >= w
+                            {
+                                continue;
+                            }
+                            chan[(ax, ay)] = c.clone();
+                        }
+                    }
+                }
+            }
         }
         for y in 0..stage.height {
             for x in 0..stage.width {
                 let (ax, ay) = (stage.x + x, stage.y + y);
-                // Contenders: contributions that touched this cell, top
-                // channel's parts first. (scratch idx, channel, gain).
+                // Contenders: channels whose composed picture touched
+                // this cell, top channel first.
                 let mut wsum = 0.0;
-                let mut parts: [(usize, usize, f64); CHANNELS * combo::MAX_PARTS] =
-                    [(0, 0, 0.0); CHANNELS * combo::MAX_PARTS];
+                let mut parts: [(usize, f64); CHANNELS] = [(0, 0.0); CHANNELS];
                 let mut n = 0;
-                for (k, &(i, _, gain)) in contrib.iter().enumerate().rev() {
-                    let cell = &self.scratch[k][(ax, ay)];
+                for &i in cell_live.iter().rev() {
+                    let cell = &self.scratch[i][(ax, ay)];
                     if cell.symbol() == " " && cell.bg == Color::Reset {
                         continue; // untouched = transparent
                     }
-                    parts[n] = (k, i, gain);
+                    let l = self.channels[i].level;
+                    parts[n] = (i, l);
                     n += 1;
-                    wsum += gain;
+                    wsum += l;
                 }
                 if n == 0 {
                     continue;
@@ -1492,10 +1529,10 @@ impl App {
                 };
                 let r = rng::unit_f64(rng::hash3(x as u64, y as u64, salt)) * (wsum + bg);
                 let mut acc = 0.0;
-                for &(k, i, l) in &parts[..n] {
+                for &(i, l) in &parts[..n] {
                     acc += l;
                     if r < acc {
-                        let mut cell = self.scratch[k][(ax, ay)].clone();
+                        let mut cell = self.scratch[i][(ax, ay)].clone();
                         // The winning channel's COLOR knob shades its
                         // cells — only while the SCFX section is lit.
                         // Both of these are the same shape — a colour in,

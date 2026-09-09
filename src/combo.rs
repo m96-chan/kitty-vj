@@ -23,21 +23,31 @@ use crate::units::Unit;
 
 pub struct Combo {
     pub name: &'static str,
-    /// Base units only, in recipe order, with the share of the
-    /// channel's fader each part takes.
+    /// Base units only, in recipe order, each with its share. What a
+    /// share means follows the part's medium: a pixel part blends or
+    /// glows at fader × share; a cell part paints over the parts below
+    /// it at that fraction of coverage (a fixed per-cell dither), full
+    /// share meaning it simply occludes where it draws.
     pub parts: Vec<(Unit, f64)>,
 }
 
 /// The built-in deck: one sample per mood, cells and pixels mixed in
 /// one recipe because the render route no longer cares. Overridable
 /// from the config by name.
+///
+/// Recipe craft, learned on the projector: geometry and radiating
+/// things layered over a field want their FULL-PIXEL versions (MCUBE,
+/// MWIRE, SPARKS3D…) — the pixel tier truly composites, additive glow
+/// over an established picture. Their cell cousins layered on a cell
+/// field read as glyph soup even with proper layering, because cells
+/// occlude whole character boxes.
 pub const SAMPLES: &[(&str, &str)] = &[
     ("ACID", "PLASMA*0.6 + MCUBE + SPARKS3D*0.5"),
     ("VOID", "STARS*0.8 + MWIRE + TUBE*0.4"),
     ("BOOTH", "FLOOR + MSPKR + RINGS*0.5"),
     ("PAPER", "PLATE + IMGDUST*0.5"),
-    ("GRID", "RAIN*0.7 + PXTUNNEL + CUBE*0.6"),
-    ("LIVE", "PXCAM + SPARKS*0.5"),
+    ("GRID", "RAIN*0.7 + FLOOR + MCUBE"),
+    ("LIVE", "PXCAM + SPARKS3D*0.5"),
 ];
 
 /// A recipe never expands past this many parts; beyond it a "scene" is
