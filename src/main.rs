@@ -566,6 +566,27 @@ impl App {
         self.jogs.iter().map(|j| j.offset()).sum()
     }
 
+    /// The strongest gesture running on any platter, if any.
+    fn jog_spin(&self) -> Option<jog::Spin> {
+        self.jogs
+            .iter()
+            .filter(|j| j.spin() != jog::Spin::None)
+            .max_by(|a, b| {
+                a.spin_amount()
+                    .partial_cmp(&b.spin_amount())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|j| j.spin())
+    }
+
+    /// How hard a spin is running, [0,1] — the trail it earns.
+    fn jog_spin_amount(&self) -> f64 {
+        self.jogs
+            .iter()
+            .map(|j| j.spin_amount())
+            .fold(0.0_f64, f64::max)
+    }
+
     /// Coast/recentre the wheels by real elapsed time.
     fn tick_jogs(&mut self, dt: f64) {
         for j in &mut self.jogs {
@@ -1075,6 +1096,40 @@ impl App {
                 self.intensity,
             ),
         }
+        // A spin earns a smear. Beat time alone moves the picture, but a
+        // thrown platter reads as motion only if the frame blurs along
+        // the direction it is travelling.
+        let smear = self.jog_spin_amount();
+        if smear > 0.02 {
+            let back = self.jog_spin() == Some(jog::Spin::Back);
+            let span = (smear * 4.0) as u16;
+            let src = frame.buffer_mut().clone();
+            for y in 0..stage.height {
+                for x in 0..stage.width {
+                    let mut acc = (0.0, 0.0, 0.0);
+                    let mut n = 0.0;
+                    for k in 0..=span {
+                        let sx = if back {
+                            (x + k).min(stage.width - 1)
+                        } else {
+                            x.saturating_sub(k)
+                        };
+                        if let Color::Rgb(r, g, b) = src[(stage.x + sx, stage.y + y)].fg {
+                            let w = 1.0 - k as f64 / (span as f64 + 1.0);
+                            acc.0 += r as f64 * w;
+                            acc.1 += g as f64 * w;
+                            acc.2 += b as f64 * w;
+                            n += w;
+                        }
+                    }
+                    if n > 0.0 {
+                        let cell = &mut frame.buffer_mut()[(stage.x + x, stage.y + y)];
+                        cell.fg = pass::rgb(acc.0 / n, acc.1 / n, acc.2 / n);
+                    }
+                }
+            }
+        }
+
         // STUTTER — in the first two beats of a phrase the pipeline is
         // re-run at only two subdivisions per beat and the held frame is
         // re-blitted otherwise. Not running the pipeline is the point:
@@ -1152,6 +1207,9 @@ impl App {
             .map(|s| format!(" [{s}]"))
             .unwrap_or_default();
         let mut trig_seg = self.triggers.hud();
+        if let Some(sp) = self.jog_spin() {
+            trig_seg.push_str(&format!(" ▶{}", sp.name()));
+        }
         if self.jogs.iter().any(|j| j.active()) {
             trig_seg.push_str(&format!(" ↻{:+.2}", self.jog_offset()));
         }
