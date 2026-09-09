@@ -212,8 +212,29 @@ struct Pools {
     /// used to be hard-wired into each composite effect over there lives
     /// here instead. Pools within a style are disjoint so a scene never
     /// runs the same part on two channels.
+    ///
+    /// One more law, learned on the projector: units in
+    /// [`CENTER_STAGE`] may appear in the feature pool ONLY. Every mesh
+    /// hero anchors itself dead centre, so two of them in one scene
+    /// superimpose there — a cube ghosting through the hero woofer.
+    /// Over there this could not happen because the GL modes were
+    /// exclusive; a mixer that stacks has to ration the centre instead.
     cast: [&'static [&'static str]; 3],
 }
+
+/// Units whose subject holds the middle of the frame — the mesh heroes
+/// and the centred cell solids. Ground and body pools must not carry
+/// them; full-screen fields (PLASMA, TUBE, STARS, FLOOR) and scattered
+/// accents (SPARKS3D) are what those roles are for.
+/// `pub(crate)`: the sample recipes obey the same rationing, and their
+/// test reads this list rather than keeping a copy of it. Test-only —
+/// it is a law about our tables, checked at build, not at runtime: a
+/// config recipe that stacks two heroes on purpose is the operator's
+/// call to make.
+#[cfg(test)]
+pub(crate) const CENTER_STAGE: &[&str] = &[
+    "MCUBE", "MWIRE", "MSPKR", "WSPKR", "MPLATE", "CUBE", "TUNNEL",
+];
 
 const STYLES: [Pools; 4] = [
     // NEON — saturated, moving, everything on. The style that takes the
@@ -234,9 +255,9 @@ const STYLES: [Pools; 4] = [
         accents: &[(0, 255, 213), (255, 0, 200), (120, 80, 255)],
         hue: (150.0, 210.0),
         cast: [
-            &["PLASMA", "PXTUNNEL", "MWIRE"],
-            &["STARS", "TUBE", "TUNNEL"],
-            &["MCUBE", "CUBE", "MPLATE"],
+            &["PLASMA", "PXTUNNEL", "STARS"],
+            &["TUBE", "SPARKS3D", "RAIN"],
+            &["MCUBE", "MWIRE", "MPLATE", "CUBE"],
         ],
     },
     // DECK — warm, club-lit, hits over treatment.
@@ -251,8 +272,8 @@ const STYLES: [Pools; 4] = [
         hue: (0.0, 60.0),
         cast: [
             &["FLOOR", "PXTUNNEL", "PULSE"],
-            &["WSPKR", "MSPKR", "SPARKS"],
-            &["PLATE", "MCUBE", "IMGDUST"],
+            &["SPARKS", "SPARKS3D", "STARS"],
+            &["WSPKR", "MSPKR", "PLATE", "MCUBE"],
         ],
     },
     // INK — monochrome, cold, sparse. No colour flash: there is no
@@ -267,9 +288,9 @@ const STYLES: [Pools; 4] = [
         accents: &[(235, 235, 235), (150, 170, 190), (90, 110, 130)],
         hue: (190.0, 40.0),
         cast: [
-            &["RAIN", "MWIRE", "COLLAPSE"],
-            &["TUNNEL", "STARS"],
-            &["CUBE", "PLATE"],
+            &["RAIN", "COLLAPSE"],
+            &["STARS", "FLOOR"],
+            &["CUBE", "MWIRE", "TUNNEL", "PLATE"],
         ],
     },
     // POSTER — flat graphic blocks. Deliberately holds no mirror and no
@@ -895,6 +916,19 @@ mod tests {
                 assert!(!pool.is_empty(), "{} has an empty cast pool", p.name);
                 for n in pool {
                     assert!(all.contains(n), "{n} is not a castable unit");
+                }
+            }
+            // The centre is rationed: mesh heroes and centred solids
+            // live in the feature pool only, or a roll superimposes two
+            // of them dead centre — a cube ghosting through the hero
+            // woofer, which is exactly the report that created this law.
+            for pool in &p.cast[..2] {
+                for n in *pool {
+                    assert!(
+                        !CENTER_STAGE.contains(n),
+                        "{} casts centre-stage {n} outside the feature channel",
+                        p.name
+                    );
                 }
             }
             // Disjoint across channels, as documented: the same part on

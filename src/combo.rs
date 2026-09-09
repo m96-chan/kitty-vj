@@ -44,7 +44,7 @@ pub struct Combo {
 pub const SAMPLES: &[(&str, &str)] = &[
     ("ACID", "PLASMA*0.6 + MCUBE + SPARKS3D*0.5"),
     ("VOID", "STARS*0.8 + MWIRE + TUBE*0.4"),
-    ("BOOTH", "FLOOR + WSPKR + RINGS*0.4"),
+    ("BOOTH", "FLOOR + WSPKR + SPARKS3D*0.4"),
     ("PAPER", "PLATE + IMGDUST*0.5"),
     ("GRID", "RAIN*0.7 + FLOOR + MCUBE"),
     ("LIVE", "PXCAM + SPARKS3D*0.5"),
@@ -175,6 +175,20 @@ mod tests {
             c.parts.iter().any(|(u, _)| matches!(u, Unit::Cell(_)))
                 && c.parts.iter().any(|(u, _)| matches!(u, Unit::Pixel(_)))
         }));
+    }
+
+    #[test]
+    fn a_sample_claims_the_centre_at_most_once() {
+        // Every mesh hero anchors dead centre; two in one recipe
+        // superimpose there. Same law the scene cast pools enforce,
+        // read from the same list.
+        for (name, def) in SAMPLES {
+            let centred = parse_def(def)
+                .iter()
+                .filter(|(n, _)| crate::scene::CENTER_STAGE.contains(&n.as_str()))
+                .count();
+            assert!(centred <= 1, "{name} claims the centre {centred} times");
+        }
     }
 
     #[test]
