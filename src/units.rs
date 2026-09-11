@@ -39,6 +39,8 @@ pub enum Pix {
     MeshPlate,
     /// The speaker rig as wireframe glow — layers instead of replacing.
     WireSpeaker,
+    /// A video file, forward-decoded with a backspin ring (video.rs).
+    Video,
 }
 
 impl Pix {
@@ -90,7 +92,7 @@ pub enum Unit {
 /// The pixel-medium units, in the order they appear after the cell ones.
 /// Cell units are appended by the app, which knows how many effects it
 /// built (a plate list may be empty).
-pub const PIX_UNITS: [(&str, Pix); 14] = [
+pub const PIX_UNITS: [(&str, Pix); 15] = [
     ("PLASMA", Pix::Plasma),
     ("PXTUNNEL", Pix::Tunnel),
     ("STARS", Pix::Stars),
@@ -105,6 +107,7 @@ pub const PIX_UNITS: [(&str, Pix); 14] = [
     ("MSPKR", Pix::MeshSpeaker),
     ("MPLATE", Pix::MeshPlate),
     ("WSPKR", Pix::WireSpeaker),
+    ("VIDEO", Pix::Video),
 ];
 
 #[cfg(test)]

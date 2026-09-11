@@ -36,6 +36,7 @@ mod source;
 mod transition;
 mod triggers;
 mod units;
+mod video;
 mod wfr;
 
 use std::time::{Duration, Instant};
@@ -316,6 +317,14 @@ struct App {
     /// camera costs a permission prompt, so it must be asked for.
     capture: std::rc::Rc<std::cell::RefCell<Option<capture::Capture>>>,
     capture_err: Option<String>,
+    /// Video files found under `<assets>/video`, and the running
+    /// decoder (spawned the first time the VIDEO unit draws).
+    videos: Vec<std::path::PathBuf>,
+    video: Option<video::Video>,
+    video_err: Option<String>,
+    /// The last frame converted for drawing, keyed by ring index — a
+    /// 60 fps render loop over a 30 fps stream reuses every other one.
+    video_cache: Option<(u64, image::RgbImage)>,
     /// Route camera motion into the drive signals.
     motion_drive: bool,
     /// Plates, shared with the effects that sample them — the mesh cube
@@ -337,7 +346,12 @@ struct App {
 }
 
 impl App {
-    fn new(plates: Vec<assets::Plate>, text: String, lyrics: lyrics::Lyrics) -> Self {
+    fn new(
+        plates: Vec<assets::Plate>,
+        text: String,
+        lyrics: lyrics::Lyrics,
+        videos: Vec<std::path::PathBuf>,
+    ) -> Self {
         let bindings = config::load(&config::path());
         let plates = std::rc::Rc::new(plates);
         // CAM is always available as a channel slot; it simply draws
@@ -448,6 +462,10 @@ impl App {
             pix_post: 0,
             capture: cap_shared,
             capture_err: None,
+            videos,
+            video: None,
+            video_err: None,
+            video_cache: None,
             motion_drive: false,
             plates: plates_shared,
             depth: raster::DepthBuffer::new(1, 1),
@@ -854,6 +872,40 @@ impl App {
                 acc,
                 acc_b,
             ),
+            units::Pix::Video => {
+                // Spawned on first draw — a decoder is a subprocess and
+                // a ring of RAM, so it must be asked for.
+                if self.video.is_none() && self.video_err.is_none() {
+                    match self.videos.first() {
+                        Some(p) => match video::Video::open(p) {
+                            Ok(v) => self.video = Some(v),
+                            Err(e) => self.video_err = Some(e),
+                        },
+                        None => self.video_err = Some("no files in <assets>/video".into()),
+                    }
+                }
+                let Some(v) = &self.video else { return };
+                // The playhead runs on the visual clock, in seconds,
+                // bent by whatever bends visual beat time (jog scrub,
+                // BACKSPIN) converted at the running tempo — which is
+                // how the backspin window gets asked for past frames.
+                let scrub = (beat - self.clock.beat()) * 60.0 / self.clock.tempo().max(1.0);
+                let t = (self.vt + scrub).max(0.0);
+                if let Some((idx, raw)) = v.frame_at(t) {
+                    if self.video_cache.as_ref().map(|(i, _)| *i) != Some(idx)
+                        && let Some(img) = image::RgbImage::from_raw(
+                            video::VID_W,
+                            video::VID_H,
+                            raw.as_ref().clone(),
+                        )
+                    {
+                        self.video_cache = Some((idx, img));
+                    }
+                    if let Some((_, img)) = &self.video_cache {
+                        source::draw_pixels(&mut self.gfx_fb, img, self.drive.gbeat(), i, true);
+                    }
+                }
+            }
         }
     }
 
@@ -2096,6 +2148,14 @@ impl App {
         } else {
             String::new()
         };
+        let vid = if let Some(e) = &self.video_err {
+            format!(" │ VID! {e}")
+        } else if let Some(v) = &self.video {
+            let n: String = v.name.chars().take(10).collect();
+            format!(" │ ▸{n}")
+        } else {
+            String::new()
+        };
         let pdj = if let Some(e) = &self.prolink_err {
             format!(" │ PDJ! {e}")
         } else if let Some(p) = &self.prolink {
@@ -2173,7 +2233,7 @@ impl App {
             " │ M:none".to_string()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l j Q ⇧F q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l j Q ⇧F q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -2187,6 +2247,7 @@ impl App {
             },
             aud,
             cam,
+            vid,
             pdj,
             lnk,
             mid,
@@ -2221,6 +2282,27 @@ fn main() -> std::io::Result<()> {
         .nth(2)
         .unwrap_or_else(|| "KITTY-VJ".to_string());
     let plates = assets::load(std::path::Path::new(&assets_dir));
+    // Video loops live beside the plates: <assets>/video/*.mp4 etc.
+    let videos = {
+        let mut v: Vec<std::path::PathBuf> =
+            std::fs::read_dir(std::path::Path::new(&assets_dir).join("video"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    matches!(
+                        p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.to_ascii_lowercase())
+                            .as_deref(),
+                        Some("mp4" | "mov" | "m4v" | "mkv" | "webm" | "avi")
+                    )
+                })
+                .collect();
+        v.sort();
+        v
+    };
     // Optional third arg names a lyric file: lyrics/<name>.lrc
     let lyrics = match std::env::args().nth(3) {
         Some(name) => lyrics::Lyrics::load(std::path::Path::new("lyrics"), &name),
@@ -2243,7 +2325,7 @@ fn main() -> std::io::Result<()> {
         std::io::stdout(),
         event::PushKeyboardEnhancementFlags(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     );
-    let mut app = App::new(plates, text, lyrics);
+    let mut app = App::new(plates, text, lyrics, videos);
     // The first roll goes live from frame one — before this, the opening
     // scene's cast and palette only landed at the first change, so the
     // rig started on defaults no scene had chosen.
