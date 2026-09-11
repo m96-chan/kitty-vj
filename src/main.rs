@@ -31,6 +31,7 @@ mod rng;
 mod scene;
 mod scfx;
 mod show;
+mod snapshot;
 mod source;
 mod transition;
 mod triggers;
@@ -39,7 +40,7 @@ mod wfr;
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
@@ -265,6 +266,27 @@ struct App {
     /// (which rebuilds the file from app state on every MIDI learn)
     /// writes them back instead of eating them.
     scene_defs: Vec<(String, String)>,
+    /// Desk snapshots — the recall bank (#22). `Q` captures, shift-F1..8
+    /// or a bound pad recalls, landing on the next downbeat.
+    snaps: [Option<snapshot::Snapshot>; snapshot::SLOTS],
+    snap_pad_bind: [Vec<(u8, u8)>; snapshot::SLOTS],
+    /// A recall waiting for the bar line: (slot, beat it was asked at).
+    snap_pending: Option<(usize, f64)>,
+    snap_waited: f64,
+    snap_last_beat: f64,
+    /// Which slot the desk was last set from, and whether hands have
+    /// moved it since — the HUD's drift star.
+    snap_active: Option<usize>,
+    snap_drift: bool,
+    /// Soft-takeover: a recalled value each physical control must reach
+    /// before it owns its target again, plus the last physical value
+    /// seen (for the crossing test).
+    hold_level: [Option<f64>; CHANNELS],
+    hold_color: [Option<f64>; CHANNELS],
+    hold_int: Option<f64>,
+    prev_cc_level: [Option<f64>; CHANNELS],
+    prev_cc_color: [Option<f64>; CHANNELS],
+    prev_cc_int: Option<f64>,
     /// Four mixer channels, composited bottom (1) to top (4).
     channels: [Channel; CHANNELS],
     /// Channel the keyboard is aimed at.
@@ -382,6 +404,23 @@ impl App {
             unit_list,
             combos,
             scene_defs: bindings.scenes.clone(),
+            snaps: std::array::from_fn(|i| {
+                bindings.snaps[i]
+                    .as_deref()
+                    .and_then(snapshot::Snapshot::parse)
+            }),
+            snap_pad_bind: bindings.snap_pads.clone(),
+            snap_pending: None,
+            snap_waited: 0.0,
+            snap_last_beat: 0.0,
+            snap_active: None,
+            snap_drift: false,
+            hold_level: [None; CHANNELS],
+            hold_color: [None; CHANNELS],
+            hold_int: None,
+            prev_cc_level: [None; CHANNELS],
+            prev_cc_color: [None; CHANNELS],
+            prev_cc_int: None,
             channels: std::array::from_fn(|i| Channel {
                 slot: units::Unit::Cell(i),
                 level: if i == 0 { 1.0 } else { 0.0 },
@@ -422,7 +461,7 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, code: KeyCode) {
+    fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char(' ') => {
@@ -562,9 +601,15 @@ impl App {
                 };
             }
             KeyCode::F(n @ 1..=8) => {
-                // Keyboard fallback (needs kitty's key protocol for release).
-                self.triggers.press(n as usize - 1, self.clock.beat());
+                if mods.contains(KeyModifiers::SHIFT) {
+                    // Snapshot recall — queued for the bar line.
+                    self.recall_snapshot(n as usize - 1);
+                } else {
+                    // Keyboard fallback (needs kitty's key protocol for release).
+                    self.triggers.press(n as usize - 1, self.clock.beat());
+                }
             }
+            KeyCode::Char('Q') => self.capture_snapshot(),
             KeyCode::Char('m') => {
                 if self.midi.connected() {
                     // Cycle the learn target: off → int → ch1..ch4 → off.
@@ -623,6 +668,7 @@ impl App {
                 let i = (c as usize) - ('1' as usize);
                 if i < self.unit_list.len() {
                     self.channels[self.focus].slot = self.unit_list[i].1;
+                    self.mark_snap_drift();
                 }
             }
             _ => {
@@ -690,6 +736,7 @@ impl App {
             .unwrap_or(0) as i32;
         let next = (cur + d).rem_euclid(n) as usize;
         self.channels[self.focus].slot = self.unit_list[next].1;
+        self.mark_snap_drift();
     }
 
     /// Is any channel bringing pixel parts at an audible level? That is
@@ -1071,6 +1118,130 @@ impl App {
         for e in &mut self.effects {
             e.on_scene(fit, sc.seed);
         }
+        // A rolled scene rewrites the desk, so the picture no longer is
+        // the recalled snapshot.
+        self.mark_snap_drift();
+    }
+
+    fn mark_snap_drift(&mut self) {
+        if self.snap_active.is_some() {
+            self.snap_drift = true;
+        }
+    }
+
+    /// Capture the desk as it stands into the bank: the first empty
+    /// slot, else the active one, else slot 1. An overwritten slot
+    /// keeps its name (the file is where renaming lives); a fresh one
+    /// is SNAP<n>.
+    fn capture_snapshot(&mut self) {
+        let slot = (0..snapshot::SLOTS)
+            .find(|i| self.snaps[*i].is_none())
+            .or(self.snap_active)
+            .unwrap_or(0);
+        let name = self.snaps[slot]
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("SNAP{}", slot + 1));
+        let s = snapshot::Snapshot {
+            name,
+            channels: std::array::from_fn(|i| {
+                let c = &self.channels[i];
+                (self.unit_name(c.slot).to_string(), c.level, c.color)
+            }),
+            intensity: self.intensity,
+            looks: self.looks.clone(),
+            cell_post: CELL_POSTS[self.cell_post].0.to_string(),
+            pix_post: PIX_POSTS[self.pix_post].0.to_string(),
+            hue_base: self.hue_base,
+            accent: self.accent,
+            accent_b: self.accent_b,
+            abcut: self.abcut,
+            stutter: self.stutter,
+        };
+        self.snaps[slot] = Some(s);
+        self.snap_active = Some(slot);
+        self.snap_drift = false;
+        self.save_bindings();
+    }
+
+    /// Queue a recall. Like every scene change it waits for the bar
+    /// line (see scene.rs on why), with the same 4-second escape hatch
+    /// against a grid that never delivers one.
+    fn recall_snapshot(&mut self, slot: usize) {
+        if slot < snapshot::SLOTS && self.snaps[slot].is_some() {
+            self.snap_pending = Some((slot, self.clock.beat()));
+            self.snap_waited = 0.0;
+        }
+    }
+
+    /// Advance the recall queue. Mirrors the director's downbeat law
+    /// rather than going through it: the director fires *rolled*
+    /// scenes, and routing a recall there would roll one over the very
+    /// desk being restored.
+    fn tick_snap(&mut self) {
+        let beat = self.clock.beat();
+        let prev = self.snap_last_beat;
+        self.snap_last_beat = beat;
+        let Some((slot, at)) = self.snap_pending else {
+            return;
+        };
+        let step = beat - prev;
+        self.snap_waited += step.abs();
+        let db = (beat / 4.0).floor() * 4.0;
+        let crossed = step > 0.0 && db > prev && db >= at;
+        let escape = 4.0 * self.clock.tempo().max(1.0) / 60.0;
+        if !crossed && self.snap_waited < escape {
+            return;
+        }
+        self.snap_pending = None;
+        self.apply_snapshot(slot);
+    }
+
+    /// Restore the desk from a slot. Physical faders now disagree with
+    /// the picture, so every recalled level arms soft-takeover: the
+    /// hardware owns its target again once it reaches the value.
+    fn apply_snapshot(&mut self, slot: usize) {
+        let Some(s) = self.snaps[slot].clone() else {
+            return;
+        };
+        // A recall is a scene change and takes an edit-length cut.
+        if let Some(tr) = scene::Length::Short.pick(&transition::TRANSITIONS)
+            && let Some(i) = transition::TRANSITIONS
+                .iter()
+                .position(|t| t.name() == tr.name())
+        {
+            for e in &mut self.effects {
+                e.on_transition(i);
+            }
+        }
+        for (i, (name, lvl, col)) in s.channels.iter().enumerate() {
+            // "-" or a renamed unit leaves the operator's slot alone.
+            if let Some(&(_, u)) = self.unit_list.iter().find(|(n, _)| n == name) {
+                self.channels[i].slot = u;
+            }
+            self.channels[i].level = *lvl;
+            self.channels[i].color = *col;
+            self.hold_level[i] = Some(*lvl);
+            self.hold_color[i] = Some(*col);
+        }
+        self.intensity = s.intensity;
+        self.hold_int = Some(s.intensity);
+        self.looks = s.looks.clone();
+        self.cell_post = CELL_POSTS
+            .iter()
+            .position(|(n, _)| *n == s.cell_post)
+            .unwrap_or(0);
+        self.pix_post = PIX_POSTS
+            .iter()
+            .position(|(n, _)| *n == s.pix_post)
+            .unwrap_or(0);
+        self.hue_base = s.hue_base;
+        self.accent = s.accent;
+        self.accent_b = s.accent_b;
+        self.abcut = s.abcut;
+        self.stutter = s.stutter;
+        self.snap_active = Some(slot);
+        self.snap_drift = false;
     }
 
     /// Advance the drive signals. Audio contributes kick/groove/onset
@@ -1117,6 +1288,8 @@ impl App {
                 .then(|| scfx::TYPES.iter().position(|t| *t == self.scfx_type))
                 .flatten(),
             scenes: self.scene_defs.clone(),
+            snaps: std::array::from_fn(|i| self.snaps[i].as_ref().map(|s| s.serialize())),
+            snap_pads: self.snap_pad_bind.clone(),
         };
         let _ = config::save(&config::path(), &b);
     }
@@ -1146,19 +1319,46 @@ impl App {
                         LearnTarget::Off => {}
                     }
                     if self.cc_bind_int == Some((ch, cc)) {
-                        self.intensity = val as f64 / 127.0;
+                        let v = val as f64 / 127.0;
+                        match self.hold_int {
+                            Some(h) if !snapshot::picks_up(h, self.prev_cc_int, v) => {}
+                            _ => {
+                                self.hold_int = None;
+                                self.intensity = v;
+                            }
+                        }
+                        self.prev_cc_int = Some(v);
                     }
                     for (j, bind) in self.jog_bind.iter().enumerate() {
                         if *bind == Some((ch, cc)) {
                             self.jogs[j].cc(val);
                         }
                     }
-                    for c in &mut self.channels {
+                    // A recalled snapshot arms soft-takeover: the fader
+                    // owns its target again only once it reaches the
+                    // recalled value, so the picture cannot jump to
+                    // wherever the hardware happened to be resting.
+                    for (i, c) in self.channels.iter_mut().enumerate() {
+                        let v = val as f64 / 127.0;
                         if c.cc == Some((ch, cc)) {
-                            c.level = val as f64 / 127.0;
+                            match self.hold_level[i] {
+                                Some(h) if !snapshot::picks_up(h, self.prev_cc_level[i], v) => {}
+                                _ => {
+                                    self.hold_level[i] = None;
+                                    c.level = v;
+                                }
+                            }
+                            self.prev_cc_level[i] = Some(v);
                         }
                         if c.color_cc == Some((ch, cc)) {
-                            c.color = val as f64 / 127.0;
+                            match self.hold_color[i] {
+                                Some(h) if !snapshot::picks_up(h, self.prev_cc_color[i], v) => {}
+                                _ => {
+                                    self.hold_color[i] = None;
+                                    c.color = v;
+                                }
+                            }
+                            self.prev_cc_color[i] = Some(v);
                         }
                     }
                 }
@@ -1199,6 +1399,13 @@ impl App {
                     }
                     if let Some(i) = self.pad_bind.iter().position(|v| v.contains(&(ch, note))) {
                         self.triggers.press(i, self.clock.beat());
+                    }
+                    if let Some(i) = self
+                        .snap_pad_bind
+                        .iter()
+                        .position(|v| v.contains(&(ch, note)))
+                    {
+                        self.recall_snapshot(i);
                     }
                 }
                 midi::MidiEvent::NoteOff { ch, note } => {
@@ -1789,6 +1996,20 @@ impl App {
                 // quiet rig at a controller-less rehearsal looks broken.
                 s.push_str("MAN ");
             }
+            // The recall bank: active slot (star = hands moved since),
+            // and a queued recall waiting for its bar line.
+            if let Some(i) = self.snap_active
+                && let Some(sn) = &self.snaps[i]
+            {
+                s.push_str(&format!(
+                    "⎈{}{} ",
+                    sn.name,
+                    if self.snap_drift { "*" } else { "" }
+                ));
+            }
+            if let Some((i, _)) = self.snap_pending {
+                s.push_str(&format!("→⎈{} ", i + 1));
+            }
             if !self.show.is_live() {
                 s.push_str(&format!("[{}] ", self.show.stage().name()));
             }
@@ -1952,7 +2173,7 @@ impl App {
             " │ M:none".to_string()
         };
         let hud_text = format!(
-            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l j q",
+            " {:>6.1} BPM │ {:>3}.{} │ {}{}{} │ SC:{}{}{}{}{}{}{} │ int {:>3.0}% │ {:>4.1}ms │ SPC ± ↑↓ TAB ←→ 1-9 ,. P w x b o h y k a C n r m c l j Q ⇧F q",
             self.clock.tempo(),
             bar,
             beat_in_bar,
@@ -2042,7 +2263,9 @@ fn main() -> std::io::Result<()> {
         while event::poll(Duration::ZERO)? {
             if let Event::Key(key) = event::read()? {
                 match key.kind {
-                    KeyEventKind::Press | KeyEventKind::Repeat => app.on_key(key.code),
+                    KeyEventKind::Press | KeyEventKind::Repeat => {
+                        app.on_key(key.code, key.modifiers)
+                    }
                     KeyEventKind::Release => app.on_key_release(key.code),
                 }
             }
@@ -2063,6 +2286,7 @@ fn main() -> std::io::Result<()> {
         app.tick_jogs(frame_dt);
         app.tick_drive(frame_dt);
         app.tick_show(frame_dt);
+        app.tick_snap();
         prev_frame = now;
         app.sync();
 

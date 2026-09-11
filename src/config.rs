@@ -81,6 +81,13 @@ pub struct Bindings {
     /// `save`, which every MIDI learn calls, or a learn would silently
     /// eat the operator's scene definitions.
     pub scenes: Vec<(String, String)>,
+    /// Desk snapshots: `snap.<slot> = <line>`, slot 1-based in the
+    /// file. Raw lines for the same reason as `scenes` — `snapshot.rs`
+    /// parses them, save must round-trip them.
+    pub snaps: [Option<String>; crate::snapshot::SLOTS],
+    /// Snapshot recall pads: `snappad.<slot> = <ch>.<note>, …` — bound
+    /// by hand from the HUD's `nt` readout for now.
+    pub snap_pads: [Vec<(u8, u8)>; crate::snapshot::SLOTS],
 }
 
 pub const SCFX_KEYS: [&str; 6] = [
@@ -140,6 +147,18 @@ pub fn parse(text: &str) -> Bindings {
                 if let Some(name) = k.strip_prefix("scene.") {
                     b.scenes
                         .push((name.trim().to_string(), val.trim().to_string()));
+                } else if let Some(n) = k.strip_prefix("snap.") {
+                    if let Ok(i) = n.trim().parse::<usize>()
+                        && (1..=crate::snapshot::SLOTS).contains(&i)
+                    {
+                        b.snaps[i - 1] = Some(val.trim().to_string());
+                    }
+                } else if let Some(n) = k.strip_prefix("snappad.") {
+                    if let Ok(i) = n.trim().parse::<usize>()
+                        && (1..=crate::snapshot::SLOTS).contains(&i)
+                    {
+                        b.snap_pads[i - 1] = val.split(',').filter_map(parse_cc).collect();
+                    }
                 } else if let Some(name) = k.strip_prefix("pad.")
                     && let Some(i) = crate::triggers::PAD_NAMES.iter().position(|n| *n == name)
                 {
@@ -208,6 +227,20 @@ pub fn save(path: &Path, b: &Bindings) -> std::io::Result<()> {
             out.push_str(&format!("scene.{name} = {def}\n"));
         }
     }
+    if b.snaps.iter().any(Option::is_some) {
+        out.push_str("# desk snapshots, captured with Q, recalled with shift-F1..8\n");
+        for (i, s) in b.snaps.iter().enumerate() {
+            if let Some(line) = s {
+                out.push_str(&format!("snap.{} = {line}\n", i + 1));
+            }
+        }
+    }
+    for (i, pads) in b.snap_pads.iter().enumerate() {
+        if !pads.is_empty() {
+            let list: Vec<String> = pads.iter().map(|cc| fmt_cc(*cc)).collect();
+            out.push_str(&format!("snappad.{} = {}  # note\n", i + 1, list.join(", ")));
+        }
+    }
     std::fs::write(path, out)
 }
 
@@ -229,6 +262,10 @@ mod tests {
             ("ACID".into(), "STARS*0.9".into()),
             ("MINE".into(), "PLASMA + RINGS*0.5".into()),
         ];
+        // And so must snapshots and their recall pads.
+        b.snaps[0] = Some("DROP; ch=PLASMA:0.80:0.50; int=0.90".into());
+        b.snaps[4] = Some("VOIDX; ch=STARS:1.00:0.50; hue=190.0".into());
+        b.snap_pads[0] = vec![(7, 40), (9, 40)];
         let dir = std::env::temp_dir().join("kitty-vj-conf-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(PATH);

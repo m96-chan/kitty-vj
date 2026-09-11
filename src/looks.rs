@@ -8,7 +8,7 @@ use ratatui::style::Color;
 use crate::drive::Drive;
 use crate::pass::{CellCtx, ColorPass, contrast, hsv, hue_rotate, luma, rgb, saturate};
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Look {
     Plain,
     /// grayscale + contrast/brightness hardening on the beat.
