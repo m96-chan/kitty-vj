@@ -2209,6 +2209,7 @@ struct CaffeinateGuard(std::process::Child);
 impl Drop for CaffeinateGuard {
     fn drop(&mut self) {
         let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -2254,66 +2255,69 @@ fn main() -> std::io::Result<()> {
     let mut prev_frame = Instant::now();
     let mut gfx_was_on = false;
 
-    let result = loop {
-        if app.quit {
-            break Ok(());
-        }
+    // Keep I/O errors inside the closure so terminal cleanup always runs.
+    let result = (|| -> std::io::Result<()> {
+        loop {
+            if app.quit {
+                break Ok(());
+            }
 
-        // Drain input.
-        while event::poll(Duration::ZERO)? {
-            if let Event::Key(key) = event::read()? {
-                match key.kind {
-                    KeyEventKind::Press | KeyEventKind::Repeat => {
-                        app.on_key(key.code, key.modifiers)
+            // Drain input.
+            while event::poll(Duration::ZERO)? {
+                if let Event::Key(key) = event::read()? {
+                    match key.kind {
+                        KeyEventKind::Press | KeyEventKind::Repeat => {
+                            app.on_key(key.code, key.modifiers)
+                        }
+                        KeyEventKind::Release => app.on_key_release(key.code),
                     }
-                    KeyEventKind::Release => app.on_key_release(key.code),
                 }
             }
-        }
 
-        // Advance the clock in whole fixed ticks.
-        let now = Instant::now();
-        acc += now.duration_since(last).as_secs_f64();
-        last = now;
-        while acc >= TICK {
-            app.clock.advance(TICK);
-            acc -= TICK;
-        }
-        app.consume_ai();
-        app.process_midi();
-        let frame_dt = now.duration_since(prev_frame).as_secs_f64();
-        app.frame_dt = frame_dt;
-        app.tick_jogs(frame_dt);
-        app.tick_drive(frame_dt);
-        app.tick_show(frame_dt);
-        app.tick_snap();
-        prev_frame = now;
-        app.sync();
+            // Advance the clock in whole fixed ticks.
+            let now = Instant::now();
+            acc += now.duration_since(last).as_secs_f64();
+            last = now;
+            while acc >= TICK {
+                app.clock.advance(TICK);
+                acc -= TICK;
+            }
+            app.consume_ai();
+            app.process_midi();
+            let frame_dt = now.duration_since(prev_frame).as_secs_f64();
+            app.frame_dt = frame_dt;
+            app.tick_jogs(frame_dt);
+            app.tick_drive(frame_dt);
+            app.tick_show(frame_dt);
+            app.tick_snap();
+            prev_frame = now;
+            app.sync();
 
-        let t0 = Instant::now();
-        terminal.draw(|f| app.draw(f))?;
-        // Graphics tier: place the pixel stage over the blank stage cells
-        // ratatui just drew. Leaving gfx mode clears the image once.
-        if app.pixel_channels_live() {
-            app.render_pixels(&mut std::io::stdout().lock())?;
-            gfx_was_on = true;
-        } else if gfx_was_on {
-            let _ = graphics::clear_all(&mut std::io::stdout().lock());
-            gfx_was_on = false;
-        }
-        let draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        app.render_ms = if app.render_ms == 0.0 {
-            draw_ms
-        } else {
-            app.render_ms * 0.9 + draw_ms * 0.1
-        };
+            let t0 = Instant::now();
+            terminal.draw(|f| app.draw(f))?;
+            // Graphics tier: place the pixel stage over the blank stage cells
+            // ratatui just drew. Leaving gfx mode clears the image once.
+            if app.pixel_channels_live() {
+                app.render_pixels(&mut std::io::stdout().lock())?;
+                gfx_was_on = true;
+            } else if gfx_was_on {
+                let _ = graphics::clear_all(&mut std::io::stdout().lock());
+                gfx_was_on = false;
+            }
+            let draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            app.render_ms = if app.render_ms == 0.0 {
+                draw_ms
+            } else {
+                app.render_ms * 0.9 + draw_ms * 0.1
+            };
 
-        // Sleep out the remainder of the frame budget, keeping input latency low.
-        let spent = t0.elapsed();
-        if spent < FRAME && event::poll(FRAME - spent)? {
-            // Input arrived — loop immediately to handle it.
+            // Sleep out the remainder of the frame budget, keeping input latency low.
+            let spent = t0.elapsed();
+            if spent < FRAME && event::poll(FRAME - spent)? {
+                // Input arrived — loop immediately to handle it.
+            }
         }
-    };
+    })();
 
     let _ = crossterm::execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
     ratatui::restore();

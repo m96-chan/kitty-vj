@@ -143,7 +143,9 @@ impl Snapshot {
                 }
                 "cpost" => s.cell_post = v.to_uppercase(),
                 "ppost" => s.pix_post = v.to_uppercase(),
-                "hue" => s.hue_base = v.parse().unwrap_or(0.0),
+                "hue" => {
+                    s.hue_base = v.parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(0.0)
+                }
                 "acc" => s.accent = parse_rgb(v).unwrap_or(s.accent),
                 "accb" => s.accent_b = parse_rgb(v).unwrap_or(s.accent_b),
                 "flags" => {
@@ -237,6 +239,15 @@ mod tests {
         assert_eq!(s.channels[0].1, 1.0);
         assert_eq!(s.channels[0].2, 0.0);
         assert_eq!(s.intensity, 1.0);
+    }
+
+    #[test]
+    fn non_finite_hues_fall_back_to_default() {
+        for value in ["NaN", "inf", "-inf", "1e999"] {
+            let s = Snapshot::parse(&format!("X; hue={value}")).unwrap();
+            assert_eq!(s.hue_base, 0.0);
+        }
+        assert_eq!(Snapshot::parse("X; hue=212.5").unwrap().hue_base, 212.5);
     }
 
     #[test]

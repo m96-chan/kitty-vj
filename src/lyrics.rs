@@ -37,9 +37,6 @@ pub fn parse(text: &str) -> Vec<Line> {
         }
         // Enhanced LRC: <mm:ss.xx> before each word.
         let (text, words) = parse_words(rest);
-        if text.is_empty() {
-            continue;
-        }
         for at in stamps {
             out.push(Line {
                 at,
@@ -63,7 +60,7 @@ fn parse_stamp(s: &str) -> Option<f64> {
         secs = secs * 60.0 + p.trim().parse::<f64>().ok()?;
     }
     secs = secs * 60.0 + parts[parts.len() - 1].trim().parse::<f64>().ok()?;
-    Some(secs)
+    (secs.is_finite() && secs >= 0.0).then_some(secs)
 }
 
 fn parse_words(s: &str) -> (String, Vec<(f64, String)>) {
@@ -74,10 +71,10 @@ fn parse_words(s: &str) -> (String, Vec<(f64, String)>) {
     let mut plain = String::new();
     let mut rest = s;
     while let Some(open) = rest.find('<') {
-        plain.push_str(&rest[..open]);
         let Some(close) = rest[open..].find('>') else {
             break;
         };
+        plain.push_str(&rest[..open]);
         let stamp = &rest[open + 1..open + close];
         rest = &rest[open + close + 1..];
         let word_end = rest.find('<').unwrap_or(rest.len());
@@ -177,6 +174,30 @@ mod tests {
         assert!((l[0].at - 12.5).abs() < 1e-9);
         assert_eq!(l[0].text, "first line");
         assert!((l[1].at - 65.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn invalid_timestamps_are_ignored() {
+        let lines = parse("[00:01]valid\n[00:NaN]bad\n[inf:00]bad\n[1e308:00]bad\n[00:-1]bad");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "valid");
+        let (_, words) = parse_words("<00:NaN>bad <00:02>valid");
+        assert_eq!(words, vec![(2.0, "valid".into())]);
+    }
+
+    #[test]
+    fn empty_timed_line_clears_previous_lyrics() {
+        let mut ly = Lyrics::new(parse("[00:00]hello\n[00:01]\n[00:10]next"));
+        ly.start();
+        ly.nudge(2.0);
+        assert_eq!(ly.current().unwrap().0.text, "");
+        assert_eq!(ly.words_done(), 0);
+    }
+
+    #[test]
+    fn unmatched_word_tag_does_not_duplicate_text() {
+        assert_eq!(parse_words("hello <world").0, "hello <world");
+        assert_eq!(parse_words("<00:01>hello <world").0, "hello <world");
     }
 
     #[test]
