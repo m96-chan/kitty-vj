@@ -206,13 +206,16 @@ impl Triggers {
         // VBREAK — the same sag, on pixel rows.
         if self.active[VBREAK] && fb.h > 0 {
             let held = (beat - self.press_beat[VBREAK]).max(0.0);
-            let src = fb.px.clone();
             let w = fb.w as usize;
+            // Bottom-up, so every source row is still the original when
+            // it is read: `sy <= y`, and only rows below `y` have been
+            // written. That is what lets this sag in place — no copy of
+            // the framebuffer, which at stage size is most of a megabyte
+            // a frame for as long as the pad is held.
             for y in (0..fb.h as usize).rev() {
                 let sag = (held * held * 0.6 * (y as f64 + 1.0) / fb.h as f64 * 2.0) as usize;
                 let sy = y.saturating_sub(sag);
                 fb.px.copy_within(sy * w * 3..(sy + 1) * w * 3, y * w * 3);
-                let _ = &src;
             }
             let k = (1.0 - held * 0.12).max(0.2);
             for p in fb.px.iter_mut() {
@@ -270,17 +273,21 @@ impl Triggers {
         // ROLL — freeze the frame, re-trigger flicker on 16ths.
         if self.active[ROLL] {
             match &self.hold {
-                None => {
-                    let mut h = Buffer::empty(area);
-                    copy_region(buf, &mut h, area);
-                    self.hold = Some(h);
-                }
-                Some(h) => {
+                Some(h) if h.area == area => {
                     copy_region(h, buf, area);
                     let k = if tick16.is_multiple_of(2) { 1.0 } else { 0.8 };
                     if k < 1.0 {
                         dim_region(buf, area, k);
                     }
+                }
+                // Nothing held yet, or held at a different stage size —
+                // the HUD toggle grows the stage by a row and a window
+                // resize changes both. Re-take rather than index last
+                // frame's buffer with this frame's area, which panics.
+                _ => {
+                    let mut h = Buffer::empty(area);
+                    copy_region(buf, &mut h, area);
+                    self.hold = Some(h);
                 }
             }
         }
@@ -370,12 +377,7 @@ impl Triggers {
                 self.echo = None; // re-snapshot below
             }
             match &self.echo {
-                None => {
-                    let mut e = Buffer::empty(area);
-                    copy_region(buf, &mut e, area);
-                    self.echo = Some(e);
-                }
-                Some(e) => {
+                Some(e) if e.area == area => {
                     for y in 0..area.height {
                         for x in 0..area.width {
                             let (ax, ay) = (area.x + x, area.y + y);
@@ -387,6 +389,13 @@ impl Triggers {
                             }
                         }
                     }
+                }
+                // No snapshot, or one taken at another stage size — see
+                // ROLL above: a stale area is a panic, not a glitch.
+                _ => {
+                    let mut e = Buffer::empty(area);
+                    copy_region(buf, &mut e, area);
+                    self.echo = Some(e);
                 }
             }
         }
@@ -421,5 +430,87 @@ fn dim_region(buf: &mut Buffer, area: Rect, k: f64) {
             cell.fg = scale(cell.fg, k);
             cell.bg = scale(cell.bg, k);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphics::Framebuffer;
+
+    fn marked(area: Rect, ch: char) -> Buffer {
+        let mut b = Buffer::empty(area);
+        for y in 0..area.height {
+            for x in 0..area.width {
+                b[(area.x + x, area.y + y)].set_char(ch);
+            }
+        }
+        b
+    }
+
+    /// The stage grows by a row when the HUD is toggled off, and by
+    /// anything at all on a window resize. A pad holding last frame's
+    /// buffer must re-take it: indexing a buffer with an area it was
+    /// not built for is a panic, and a panic mid-set is the whole show.
+    #[test]
+    fn a_held_frame_survives_the_stage_changing_size() {
+        let small = Rect::new(0, 0, 20, 10);
+        let big = Rect::new(0, 0, 40, 20); // HUD off / window resized
+
+        for pad in [ROLL, ECHO] {
+            let mut t = Triggers::new();
+            t.press(pad, 0.0);
+            t.post(&mut marked(small, 'a'), small, 0.0);
+
+            let mut grown = marked(big, 'b');
+            t.post(&mut grown, big, 0.5);
+            assert_eq!(
+                grown[(39, 19)].symbol(),
+                "b",
+                "pad {} should have re-taken the frame, not replayed a stale one",
+                PAD_NAMES[pad]
+            );
+
+            // And back down again, which is the same hazard reversed.
+            let mut shrunk = marked(small, 'c');
+            t.post(&mut shrunk, small, 1.0);
+        }
+    }
+
+    /// VBREAK sags the pixel rows in place. That is only correct while
+    /// every source row is still untouched when it is read — bottom-up,
+    /// `sy <= y` — so pin it against the obvious copy-based version. If
+    /// the direction of the loop ever flips this fails instead of
+    /// smearing one row down the whole frame.
+    #[test]
+    fn the_pixel_sag_in_place_matches_a_copied_source() {
+        let (w, h) = (4u32, 24u32);
+        let mut fb = Framebuffer::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                fb.set(x, y, (y * 10) as u8, 0, 0);
+            }
+        }
+        let before = fb.px.clone();
+
+        let mut t = Triggers::new();
+        t.press(VBREAK, 0.0);
+        let beat = 2.0;
+        t.post_fb(&mut fb, beat);
+
+        // The reference: read every row from an untouched copy.
+        let held = beat;
+        let k = (1.0 - held * 0.12).max(0.2);
+        let mut want = before.clone();
+        let wb = w as usize * 3;
+        for y in 0..h as usize {
+            let sag = (held * held * 0.6 * (y as f64 + 1.0) / h as f64 * 2.0) as usize;
+            let sy = y.saturating_sub(sag);
+            want[y * wb..(y + 1) * wb].copy_from_slice(&before[sy * wb..(sy + 1) * wb]);
+        }
+        for p in want.iter_mut() {
+            *p = (*p as f64 * k) as u8;
+        }
+        assert_eq!(fb.px, want);
     }
 }

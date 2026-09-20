@@ -40,7 +40,10 @@ impl Effect for Collapse {
         if area.width < 10 || area.height < 8 {
             return;
         }
-        let beat_in_bar = ctx.bar_phase as usize; // 0..3
+        // Clamped as well as wrapped at the source: this is the one
+        // place a `bar_phase` that slipped to 4.0 would be a panic
+        // rather than a wrong-looking frame.
+        let beat_in_bar = (ctx.bar_phase as usize).min(DIGITS.len() - 1); // 0..3
         let digit = &DIGITS[beat_in_bar];
 
         // Scale the 5x7 bitmap to fill ~60% of the area.

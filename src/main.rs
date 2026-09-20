@@ -884,14 +884,18 @@ impl App {
                         None => self.video_err = Some("no files in <assets>/video".into()),
                     }
                 }
-                let Some(v) = &self.video else { return };
                 // The playhead runs on the visual clock, in seconds,
                 // bent by whatever bends visual beat time (jog scrub,
                 // BACKSPIN) converted at the running tempo — which is
                 // how the backspin window gets asked for past frames.
+                // The decoder ties its own frame zero to the first `t`
+                // it is handed, so this stays the app's clock and does
+                // not have to be rebased here.
                 let scrub = (beat - self.clock.beat()) * 60.0 / self.clock.tempo().max(1.0);
                 let t = (self.vt + scrub).max(0.0);
-                if let Some((idx, raw)) = v.frame_at(t) {
+                let Some(v) = &mut self.video else { return };
+                let got = v.frame_at(t);
+                if let Some((idx, raw)) = got {
                     if self.video_cache.as_ref().map(|(i, _)| *i) != Some(idx)
                         && let Some(img) = image::RgbImage::from_raw(
                             video::VID_W,
@@ -1690,8 +1694,8 @@ impl App {
             beat: vbeat,
             dt: self.frame_dt,
             vt: self.vt,
-            phase: vbeat.rem_euclid(1.0),
-            bar_phase: vbeat.rem_euclid(4.0),
+            phase: effects::wrap(vbeat, 1.0),
+            bar_phase: effects::wrap(vbeat, 4.0),
             intensity: self.intensity,
             drive: self.drive,
         };

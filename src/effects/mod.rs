@@ -62,6 +62,19 @@ impl FrameCtx {
     }
 }
 
+/// `v` wrapped into `[0, n)` — the half-open range `phase` and
+/// `bar_phase` document.
+///
+/// `f64::rem_euclid` alone does **not** give that range: for a `v` a
+/// hair below zero it computes `v % n + n`, which rounds up to exactly
+/// `n`. Backspin and jog scrub can put the visual beat there, and a
+/// `bar_phase` of 4.0 indexes a four-entry table out of bounds. So the
+/// wrap is one function and the contract is true wherever it is used.
+pub fn wrap(v: f64, n: f64) -> f64 {
+    let r = v.rem_euclid(n);
+    if r < n { r } else { 0.0 }
+}
+
 pub trait Effect {
     fn name(&self) -> &'static str;
     fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &FrameCtx);
@@ -103,4 +116,29 @@ pub const RAMP: &[char] = &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
 pub fn ramp_glyph(v: f64) -> char {
     let i = (v.clamp(0.0, 1.0) * (RAMP.len() - 1) as f64).round() as usize;
     RAMP[i]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rem_euclid` alone leaks the upper bound: jog scrub and backspin
+    /// can leave the visual beat a hair below zero, and `(-1e-18).rem_
+    /// euclid(4.0)` rounds up to exactly 4.0. `bar_phase` indexes a
+    /// four-entry digit table in COLLAPSE, so that was a panic.
+    #[test]
+    fn the_phase_range_is_half_open_even_just_below_zero() {
+        for v in [-1e-18f64, -1e-16, -f64::MIN_POSITIVE, -0.0] {
+            assert!(v.rem_euclid(4.0) == 4.0 || v.rem_euclid(4.0) == 0.0);
+            assert!(wrap(v, 4.0) < 4.0, "bar_phase {v:e} -> {}", wrap(v, 4.0));
+            assert!(wrap(v, 1.0) < 1.0, "phase {v:e} -> {}", wrap(v, 1.0));
+        }
+        // Ordinary values are untouched.
+        assert_eq!(wrap(2.5, 4.0), 2.5);
+        assert_eq!(wrap(-1.0, 4.0), 3.0);
+        assert_eq!(wrap(5.5, 4.0), 1.5);
+        // And nothing non-finite escapes into an array index.
+        assert_eq!(wrap(f64::NAN, 4.0), 0.0);
+        assert_eq!(wrap(f64::INFINITY, 4.0), 0.0);
+    }
 }

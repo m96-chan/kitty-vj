@@ -88,8 +88,43 @@ pub struct Video {
     playhead: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     child: Child,
+    /// Maps the caller's clock onto the decoder's frame numbering.
+    clock: Playhead,
     /// File stem, for the HUD.
     pub name: String,
+}
+
+/// The caller's clock, tied to the decoder's frame numbering at the
+/// first frame asked for.
+///
+/// The decoder numbers frames from zero, but the app's visual clock has
+/// been running since launch and the decoder is only spawned when an
+/// operator picks VIDEO — minutes in, on a normal set. Without tying
+/// the two together at the first ask, the playhead sits thousands of
+/// frames past anything decoded: the trim floor drops every frame the
+/// instant it lands, `pick` never returns one, and the pacing loop
+/// never engages, so ffmpeg decodes the file at full speed forever and
+/// nothing is ever drawn.
+///
+/// Its own type because that is the whole bug, and a bug wants a test
+/// that does not need a subprocess to run.
+#[derive(Default)]
+struct Playhead {
+    /// Caller time at the first frame asked for, seconds.
+    epoch: Option<f64>,
+}
+
+impl Playhead {
+    /// Frame index for caller time `t`. The first call defines frame
+    /// zero; backspin past it floors there rather than wrapping a
+    /// negative into a huge index.
+    fn frame(&mut self, t: f64) -> u64 {
+        if !t.is_finite() {
+            return 0;
+        }
+        let epoch = *self.epoch.get_or_insert(t);
+        ((t - epoch) * FPS).max(0.0) as u64
+    }
 }
 
 impl Drop for Video {
@@ -169,6 +204,7 @@ impl Video {
             playhead,
             stop,
             child,
+            clock: Playhead::default(),
             name: path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -179,12 +215,13 @@ impl Video {
     /// The frame for `t` seconds of playhead time, with its index so
     /// the caller can skip re-converting a frame it already drew.
     /// Clamped into the window at both ends.
-    pub fn frame_at(&self, t: f64) -> Option<(u64, Arc<Vec<u8>>)> {
-        let target = if t.is_finite() && t > 0.0 {
-            (t * FPS) as u64
-        } else {
-            0
-        };
+    ///
+    /// `t` is the caller's own clock — it does not have to start at
+    /// zero. Whatever it reads on the first call is frame zero of the
+    /// stream, and every frame after that is measured from there; see
+    /// the `Playhead` note for why that matters.
+    pub fn frame_at(&mut self, t: f64) -> Option<(u64, Arc<Vec<u8>>)> {
+        let target = self.clock.frame(t);
         self.playhead.store(target, Ordering::Relaxed);
         self.ring.lock().unwrap().pick(target)
     }
@@ -216,6 +253,45 @@ mod tests {
         // Ahead of what is decoded: the newest there is.
         assert_eq!(r.pick(500).unwrap().0, 159);
         assert!(Ring::new().pick(0).is_none());
+    }
+
+    #[test]
+    fn the_clock_the_caller_already_has_is_frame_zero() {
+        // An operator picks VIDEO ten minutes into the set, so the
+        // first `t` the decoder ever sees is 600, not 0.
+        let mut p = Playhead::default();
+        assert_eq!(p.frame(600.0), 0, "the first ask is frame 0");
+        assert_eq!(p.frame(604.0), 120, "four seconds in");
+        // Backspin past the moment the decoder started floors, rather
+        // than wrapping a negative into a huge frame index.
+        assert_eq!(p.frame(599.0), 0);
+        assert_eq!(p.frame(f64::NAN), 0);
+        // A NaN must not have become the epoch.
+        assert_eq!(p.frame(602.0), 60);
+    }
+
+    #[test]
+    fn a_late_start_still_fills_the_ring() {
+        // The regression: with the playhead on the app's clock and the
+        // decoder numbering from zero, every decoded frame fell below
+        // the trim floor the instant it landed. The ring stayed empty,
+        // nothing drew, and the pacing loop never engaged — ffmpeg ran
+        // flat out for the rest of the set.
+        let mut p = Playhead::default();
+        let mut r = Ring::new();
+        let mut t = 600.0;
+        for _ in 0..50 {
+            let idx = r.next;
+            r.frames.push_back((idx, Arc::new(vec![0u8])));
+            r.next += 1;
+            r.trim(p.frame(t));
+            t += 1.0 / FPS;
+        }
+        assert!(
+            r.pick(p.frame(t)).is_some(),
+            "ring emptied: {} frames",
+            r.frames.len()
+        );
     }
 
     #[test]
